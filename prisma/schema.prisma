@@ -1,0 +1,543 @@
+generator client {
+    provider = "prisma-client-js"
+    binaryTargets = ["native", "linux-musl-arm64-openssl-3.0.x"]
+}
+
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String     @id @default(cuid())
+  email         String     @unique
+  passwordHash  String?    @default("") @map("password_hash")
+  name          String     @default("")
+  phone         String?    @default("")
+  role          String     @default("user") // "admin", "advisor", "user"
+  emailVerified DateTime?  @map("email_verified")
+  image         String?
+  budget        String?    @default("")
+  preferredType String?    @default("") @map("preferred_type")
+  zoneInterest  String?    @default("") @map("zone_interest")
+  tags          String[]   @default([])
+  createdAt     DateTime   @default(now()) @map("created_at")
+  orders        Order[]
+  cartItems     CartItem[]
+  favorites     Favorite[]
+  clientNotes   ClientNote[] @relation("ClientNotes")
+  advisorNotes  ClientNote[] @relation("AdvisorNotes")
+  assignedAppointments Appointment[] @relation("AdvisorAppointments")
+  crmStages     CRMStage[]
+  funnelEvents  FunnelEvent[]
+  accounts      Account[]
+  advisorProfile AdvisorProfile?
+
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String  @map("user_id")
+  type              String
+  provider          String
+  providerAccountId String  @map("provider_account_id")
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Constructor {
+  id               String   @id @default(cuid())
+  name             String
+  slug             String   @unique
+  logoCloudPath    String?  @map("logo_cloud_path")
+  coverCloudPath   String?  @map("cover_cloud_path")
+  description      String   @default("")
+  styles           String[] @default([])
+  customModels     Boolean  @default(false) @map("custom_models")
+  yearsExperience  Int      @default(0) @map("years_experience")
+  guarantee        String?  @default("")
+  counseling       String?  @default("")
+  active           Boolean  @default(true)
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+  properties       Property[]
+  blogPosts        BlogPost[]
+
+  @@map("constructors")
+}
+
+model Property {
+  id                  String          @id @default(cuid())
+  address             String
+  city                String          @default("Buenos Aires")
+  constructionCompany String          @default("Sin especificar") @map("construction_company")
+  constructorId       String?         @map("constructor_id")
+  price               Float
+  surface             Float
+  age                 Int
+  legalStatus         String          @default("En regla") @map("legal_status")
+  financingStatus     String          @default("Consultar") @map("financing_status")
+  constructionStyle   String          @default("Moderna") @map("construction_style")
+  consultingPrice     Float           @map("consulting_price")
+  images              String[]
+  description         String          @default("")
+  planImageUrl        String?  @default("") @map("plan_image_url")
+  planDescription     String?  @default("") @map("plan_description")
+  faqJson             String?  @default("[]") @map("faq_json")
+  locationDetail      String?  @default("") @map("location_detail")
+  locationMapUrl      String?  @default("") @map("location_map_url")
+  deliveryTimeDays    Int?     @default(45) @map("delivery_time_days")
+  deliveryTimeNote    String?  @default("") @map("delivery_time_note")
+  financingSimDetail  String?  @default("") @map("financing_sim_detail")
+  bedrooms            Int             @default(3)
+  bathrooms           Int             @default(2)
+  active              Boolean         @default(true)
+  viewCount           Int             @default(0) @map("view_count")
+  isNewLine           Boolean         @default(false) @map("is_new_line")
+  isFeatured          Boolean         @default(false) @map("is_featured")
+  createdAt           DateTime        @default(now()) @map("created_at")
+  constructorRef      Constructor?    @relation(fields: [constructorId], references: [id])
+  appointments        Appointment[]
+  cartItems           CartItem[]
+  media               PropertyMedia[]
+  favorites           Favorite[]
+  simulatorCombinations SimulatorCombination[]
+  simulatorColors        SimulatorColor[]
+  simulatorRevestimientos SimulatorRevestimiento[]
+
+  @@map("properties")
+}
+
+model PropertyMedia {
+  id               String   @id @default(cuid())
+  propertyId       String   @map("property_id")
+  cloudStoragePath String   @map("cloud_storage_path")
+  fileName         String   @map("file_name")
+  fileType         String   @map("file_type")
+  fileSize         Int      @map("file_size")
+  mediaType        String   @map("media_type")
+  isPublic         Boolean  @default(true) @map("is_public")
+  sortOrder        Int      @default(0) @map("sort_order")
+  createdAt        DateTime @default(now()) @map("created_at")
+  property         Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@map("property_media")
+}
+
+model Order {
+  id             String        @id @default(cuid())
+  userId         String        @map("user_id")
+  orderNumber    String        @unique @map("order_number")
+  totalAmount    Float         @map("total_amount")
+  subtotal       Float         @default(0)
+  tax            Float         @default(0)
+  status         String        @default("pending")
+  mpPreferenceId String?       @map("mp_preference_id")
+  mpPaymentId    String?       @map("mp_payment_id")
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+  user           User          @relation(fields: [userId], references: [id])
+  appointments   Appointment[]
+
+  @@map("orders")
+}
+
+model Appointment {
+  id            String   @id @default(cuid())
+  orderId       String   @map("order_id")
+  propertyId    String?  @map("property_id")
+  advisorId     String?  @map("advisor_id")
+  scheduledDate String   @map("scheduled_date")
+  scheduledTime String   @map("scheduled_time")
+  status        String   @default("pending")
+  notes         String?  @default("")
+  appointmentType String @default("property") @map("appointment_type")
+  createdAt     DateTime @default(now()) @map("created_at")
+  order         Order    @relation(fields: [orderId], references: [id])
+  property      Property? @relation(fields: [propertyId], references: [id])
+  advisor       User?    @relation("AdvisorAppointments", fields: [advisorId], references: [id])
+
+  @@unique([scheduledDate, scheduledTime])
+  @@map("appointments")
+}
+
+model CartItem {
+  id         String   @id @default(cuid())
+  userId     String   @map("user_id")
+  propertyId String   @map("property_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+  user       User     @relation(fields: [userId], references: [id])
+  property   Property @relation(fields: [propertyId], references: [id])
+
+  @@unique([userId, propertyId])
+  @@map("cart_items")
+}
+
+model Favorite {
+  id         String   @id @default(cuid())
+  userId     String   @map("user_id")
+  propertyId String   @map("property_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+  user       User     @relation(fields: [userId], references: [id])
+  property   Property @relation(fields: [propertyId], references: [id])
+
+  @@unique([userId, propertyId])
+  @@map("favorites")
+}
+
+model BlogPost {
+  id          String   @id @default(cuid())
+  title       String
+  slug        String   @unique
+  excerpt     String   @default("")
+  content     String
+  coverImage  String?  @map("cover_image")
+  author      String   @default("CVA Deal")
+  category    String   @default("Entrega") // Entrega, Novedad, Testimonio, Evento
+  location    String?  @default("")
+  constructorId String? @map("constructor_id")
+  constructorRef Constructor? @relation(fields: [constructorId], references: [id])
+  viewCount   Int      @default(0) @map("view_count")
+  published   Boolean  @default(false)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("blog_posts")
+}
+
+model ClientNote {
+  id        String   @id @default(cuid())
+  clientId  String   @map("client_id")
+  advisorId String   @map("advisor_id")
+  content   String
+  createdAt DateTime @default(now()) @map("created_at")
+  client    User     @relation("ClientNotes", fields: [clientId], references: [id])
+  advisor   User     @relation("AdvisorNotes", fields: [advisorId], references: [id])
+
+  @@map("client_notes")
+}
+
+model CRMStage {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  stage     String   @default("new_lead") // new_lead, contacted, appointment_scheduled, advisory_done, negotiation, closed
+  updatedAt DateTime @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId])
+  @@map("crm_stages")
+}
+
+model CRMClient {
+  id                String   @id @default(cuid())
+  firstName         String   @map("first_name")
+  lastName          String   @map("last_name")
+  email             String   @default("")
+  phone             String   @default("")
+  locality          String   @default("")
+  propertiesInterest String[] @default([]) @map("properties_interest")
+  stage             String   @default("new_lead") // new_lead, contacted, appointment_scheduled, advisory_done, negotiation, closed
+  nextContactDate   DateTime? @map("next_contact_date")
+  nextContactNote   String?  @default("") @map("next_contact_note")
+  notes             String   @default("")
+  assignedAdvisorId String?  @map("assigned_advisor_id")
+  profession        String?  @default("")
+  company           String?  @default("")
+  avatarUrl         String?  @default("") @map("avatar_url")
+  socialLinks       String?  @default("") @map("social_links")
+  insights          String?  @default("")
+  alerts            String?  @default("")
+  lastEnriched      DateTime? @map("last_enriched")
+  conversationText       String?   @default("") @map("conversation_text")
+  conversationSentiment  String?   @default("") @map("conversation_sentiment")
+  conversationAnalysis   String?   @default("") @map("conversation_analysis")
+  suggestedProfileChanges String?  @default("") @map("suggested_profile_changes")
+  activityLogs      CRMActivityLog[]
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@map("crm_clients")
+}
+
+model CRMActivityLog {
+  id          String    @id @default(cuid())
+  clientId    String    @map("client_id")
+  type        String    @default("system")
+  title       String
+  description String    @default("")
+  metadata    String?   @default("")
+  createdById String?   @map("created_by_id")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  client      CRMClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, createdAt])
+  @@map("crm_activity_logs")
+}
+
+model SimulatorCombination {
+  id               String   @id @default(cuid())
+  propertyId       String   @map("property_id")
+  name             String   @default("")
+  style            String   @default("")
+  viewType         String   @default("exterior") @map("view_type") // "exterior" or "interior"
+  imageCloudPath   String   @map("image_cloud_path")
+  colorPrimary     String?  @default("") @map("color_primary")
+  colorSecondary   String?  @default("") @map("color_secondary")
+  revestimiento    String?  @default("")
+  revestimientoCategory String? @default("paredes") @map("revestimiento_category")
+  isRecommended    Boolean  @default(false) @map("is_recommended")
+  sortOrder        Int      @default(0) @map("sort_order")
+  createdAt        DateTime @default(now()) @map("created_at")
+  property         Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@map("simulator_combinations")
+}
+
+model SimulatorColor {
+  id         String   @id @default(cuid())
+  propertyId String   @map("property_id")
+  type       String   // "primary" or "secondary"
+  name       String   @default("")
+  hexCode    String   @map("hex_code")
+  sortOrder  Int      @default(0) @map("sort_order")
+  createdAt  DateTime @default(now()) @map("created_at")
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@map("simulator_colors")
+}
+
+model SimulatorRevestimiento {
+  id                  String   @id @default(cuid())
+  propertyId          String   @map("property_id")
+  category            String   @default("paredes") // "paredes", "zocalo", "detalles"
+  name                String
+  thumbnailCloudPath  String   @map("thumbnail_cloud_path")
+  sortOrder           Int      @default(0) @map("sort_order")
+  createdAt           DateTime @default(now()) @map("created_at")
+  property            Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@map("simulator_revestimientos")
+}
+
+model AdvisorProfile {
+  id                     String  @id @default(cuid())
+  userId                 String  @unique @map("user_id")
+  bio                    String  @default("")
+  specialty              String  @default("")
+  profileImageCloudPath  String? @map("profile_image_cloud_path")
+  cvCloudPath            String? @map("cv_cloud_path")
+  yearsExperience        Int     @default(0) @map("years_experience")
+  active                 Boolean @default(true)
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @updatedAt @map("updated_at")
+  user                   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("advisor_profiles")
+}
+
+model FinancingPlan {
+  id            String  @id @default(cuid())
+  name          String  @default("")
+  installments  Int     @map("installments")
+  downPaymentPct Float  @map("down_payment_pct")
+  monthlyAmount Float   @map("monthly_amount")
+  totalAmount   Float   @map("total_amount")
+  interestRate  Float   @default(0) @map("interest_rate")
+  currency      String  @default("ARS")
+  active        Boolean @default(true)
+  sortOrder     Int     @default(0) @map("sort_order")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@map("financing_plans")
+}
+
+model EnergySimConfig {
+  id       String @id @default(cuid())
+  sizeM2   Int    @map("size_m2")
+  label    String @default("")
+  tradCost Float  @map("trad_cost")
+  secoCost Float  @map("seco_cost")
+  active   Boolean @default(true)
+  sortOrder Int   @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([sizeM2])
+  @@map("energy_sim_configs")
+}
+
+model StatsPopup {
+  id          String   @id @default(cuid())
+  section     String   // "home" or "entregas"
+  statKey     String   @map("stat_key") // e.g. "clientes_asesorados", "viviendas_vendidas"
+  title       String   @default("")
+  content     String   @default("")
+  value       String   @default("")
+  label       String   @default("")
+  active      Boolean  @default(true)
+  sortOrder   Int      @default(0) @map("sort_order")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@unique([section, statKey])
+  @@map("stats_popups")
+}
+
+model FunnelEvent {
+  id        String   @id @default(cuid())
+  userId    String?  @map("user_id")
+  event     String   // "visit", "cart_add", "checkout", "payment", "appointment_done"
+  metadata  String?  @default("")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User?    @relation(fields: [userId], references: [id])
+
+  @@map("funnel_events")
+}
+
+// ============================================================
+// OSINT Intelligence Platform — Knowledge Graph Models
+// ============================================================
+
+/// A node in the Knowledge Graph. Each row is a person, company, phone,
+/// email, domain, website, social profile, address, or news item.
+/// The `naturalKey` column is a deterministic identifier used for
+/// deduplication and entity resolution (e.g. "phone:5491112345678").
+model OsintEntity {
+  id                  String   @id @default(cuid())
+  type                String   // EntityType enum
+  naturalKey          String   @map("natural_key") // `${type}:${deterministicKeyValue}`
+  propertiesJson      String   @map("properties_json") // serialized EntityProperties
+  confidence          Float    @default(0)
+  confidenceFactorsJson String @default("{}") @map("confidence_factors_json")
+  evidenceJson        String   @default("[]") @map("evidence_json") // serialized EvidenceRef[]
+  firstSeenAt         DateTime @default(now()) @map("first_seen_at")
+  lastVerifiedAt      DateTime @default(now()) @map("last_verified_at")
+  lastUpdatedByRunId  String   @map("last_updated_by_run_id")
+  supersededBy        String?  @map("superseded_by")
+  crmClientId         String?  @map("crm_client_id")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  relationsAsSource   OsintRelation[] @relation("RelationSource")
+  relationsAsTarget   OsintRelation[] @relation("RelationTarget")
+  evidence            OsintEvidence[]
+
+  @@unique([type, naturalKey])
+  @@index([crmClientId])
+  @@index([type])
+  @@index([lastVerifiedAt])
+  @@map("osint_entities")
+}
+
+/// A directed edge in the Knowledge Graph (e.g. Person WORKS_AT Company).
+model OsintRelation {
+  id                  String   @id @default(cuid())
+  type                String   // RelationType enum
+  sourceId            String   @map("source_id")
+  targetId            String   @map("target_id")
+  propertiesJson      String   @default("{}") @map("properties_json")
+  confidence          Float    @default(0)
+  confidenceFactorsJson String @default("{}") @map("confidence_factors_json")
+  evidenceJson        String   @default("[]") @map("evidence_json")
+  firstSeenAt         DateTime @default(now()) @map("first_seen_at")
+  lastVerifiedAt      DateTime @default(now()) @map("last_verified_at")
+  lastUpdatedByRunId  String   @map("last_updated_by_run_id")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  source              OsintEntity @relation("RelationSource", fields: [sourceId], references: [id], onDelete: Cascade)
+  target              OsintEntity @relation("RelationTarget", fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@unique([type, sourceId, targetId])
+  @@index([sourceId])
+  @@index([targetId])
+  @@index([type])
+  @@map("osint_relations")
+}
+
+/// Raw evidence record — what a provider found, where, and why it matched.
+model OsintEvidence {
+  id              String   @id @default(cuid())
+  runId           String   @map("run_id")
+  entityId        String?  @map("entity_id")
+  sourceDomain    String   @map("source_domain")
+  sourceUrl       String   @map("source_url")
+  sourceType      String   @map("source_type")
+  provider        String
+  title           String   @default("")
+  snippet         String   @default("")
+  rawContent      String?  @map("raw_content") @db.Text
+  matchReasonsJson String  @default("[]") @map("match_reasons_json")
+  extractedAt     DateTime @default(now()) @map("extracted_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  entity          OsintEntity? @relation(fields: [entityId], references: [id], onDelete: SetNull)
+
+  @@index([runId])
+  @@index([entityId])
+  @@index([sourceDomain])
+  @@map("osint_evidence")
+}
+
+/// A single investigation run for a CRM client.
+model OsintRun {
+  id              String    @id @default(cuid())
+  clientId        String    @map("client_id")
+  trigger         String    @default("manual") // manual | scheduled | webhook
+  triggeredBy     String    @default("") @map("triggered_by")
+  status          String    @default("pending") // pending | running | completed | partial | failed | timeout
+  cyclesExecuted  Int       @default(0) @map("cycles_executed")
+  startedAt       DateTime  @default(now()) @map("started_at")
+  completedAt     DateTime? @map("completed_at")
+  durationMs      Int       @default(0) @map("duration_ms")
+  metricsJson     String?   @map("metrics_json") @db.Text
+  auditTrailJson  String?   @map("audit_trail_json") @db.Text
+  error           String?   @db.Text
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  @@index([clientId, startedAt])
+  @@index([status])
+  @@map("osint_runs")
+}
+
+/// Provider search results cache to avoid re-querying within TTL.
+model OsintSearchCache {
+  id          String   @id @default(cuid())
+  cacheKey    String   @unique @map("cache_key")
+  provider    String
+  query       String
+  resultsJson String   @map("results_json") @db.Text
+  createdAt   DateTime @default(now()) @map("created_at")
+  expiresAt   DateTime @map("expires_at")
+
+  @@index([expiresAt])
+  @@index([provider])
+  @@map("osint_search_cache")
+}
+
+/// Human feedback for specific OSINT findings to calibrate the Confidence Engine
+model OsintFeedback {
+  id            String   @id @default(cuid())
+  runId         String   @map("run_id")
+  entityId      String?  @map("entity_id")
+  field         String?  // e.g., "profession", "company"
+  isCorrect     Boolean  @map("is_correct")
+  comments      String?  @db.Text
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([runId])
+  @@index([entityId])
+  @@index([field])
+  @@map("osint_feedback")
+}

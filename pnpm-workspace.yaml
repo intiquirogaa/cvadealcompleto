@@ -1,0 +1,30 @@
+allowBuilds:
+  '@prisma/client': set this to true or false
+  '@prisma/engines': set this to true or false
+  '@whiskeysockets/baileys': set this to true or false
+  bufferutil: set this to true or false
+  es5-ext: set this to true or false
+  esbuild: set this to true or false
+  prisma: set this to true or false
+  protobufjs: set this to true or false
+  unrs-resolver: set this to true or false
+  utf-8-validate: set this to true or false
+minimumReleaseAgeExclude:
+  - '@img/sharp-darwin-arm64@0.35.3'
+  - '@img/sharp-darwin-x64@0.35.3'
+  - '@img/sharp-freebsd-wasm32@0.35.3'
+  - '@img/sharp-linux-arm64@0.35.3'
+  - '@img/sharp-linux-arm@0.35.3'
+  - '@img/sharp-linux-ppc64@0.35.3'
+  - '@img/sharp-linux-riscv64@0.35.3'
+  - '@img/sharp-linux-s390x@0.35.3'
+  - '@img/sharp-linux-x64@0.35.3'
+  - '@img/sharp-linuxmusl-arm64@0.35.3'
+  - '@img/sharp-linuxmusl-x64@0.35.3'
+  - '@img/sharp-wasm32@0.35.3'
+  - '@img/sharp-webcontainers-wasm32@0.35.3'
+  - '@img/sharp-win32-arm64@0.35.3'
+  - '@img/sharp-win32-ia32@0.35.3'
+  - '@img/sharp-win32-x64@0.35.3'
+  - sharp@0.35.3
+nodeLinker: hoisted

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <rect width="256" height="256" fill="#1a2332"/>
+  <path d="M128 45 L145 62 L145 85 L135 85 L135 70 L121 70 L121 85 L111 85 L111 62 Z" fill="#d4a843"/>
+  <circle cx="128" cy="52" r="4" fill="#1a2332"/>
+  <text x="128" y="180" font-family="Arial, sans-serif" font-size="90" font-weight="bold" fill="#d4a843" text-anchor="middle">CVA</text>
+</svg>
