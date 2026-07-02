@@ -6,7 +6,10 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { Send, Loader2, MessageSquare, Search, RefreshCw } from 'lucide-react';
+import { Send, Loader2, MessageSquare, Search, RefreshCw, LogOut } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react';
+
+type ConnectionStatus = 'disconnected' | 'connecting' | 'qr' | 'connected';
 
 interface Chat {
   id: string;
@@ -38,10 +41,63 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [isConnected, setIsConnected] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
+  const [qrCode, setQrCode] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   console.log('[WhatsAppChat] Component mounted');
+
+  const checkStatus = async () => {
+    try {
+      const res = await fetch('/api/whatsapp/connect');
+      const data = await res.json();
+      if (data.status === 'connected') {
+        setConnectionStatus('connected');
+        fetchChats();
+      } else if (data.status === 'qr' && data.qrCode) {
+        setConnectionStatus('qr');
+        setQrCode(data.qrCode);
+      } else {
+        setConnectionStatus(data.status || 'disconnected');
+      }
+    } catch(e) {
+      setConnectionStatus('disconnected');
+    }
+  };
+
+  const connectWhatsApp = async () => {
+    setConnectionStatus('connecting');
+    try {
+      const res = await fetch('/api/whatsapp/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'connect' })
+      });
+      const data = await res.json();
+      if (data.status) setConnectionStatus(data.status);
+      if (data.qrCode) setQrCode(data.qrCode);
+    } catch(e) {
+      setConnectionStatus('disconnected');
+    }
+  };
+
+  const disconnectWhatsApp = async () => {
+    try {
+      await fetch('/api/whatsapp/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'clear' })
+      });
+      setConnectionStatus('disconnected');
+      setQrCode(null);
+      setChats([]);
+      setSelectedChat(null);
+      setMessages([]);
+      onDisconnected?.();
+    } catch (e) {
+      console.error('Error disconnecting', e);
+    }
+  };
 
   const fetchChats = async () => {
     console.log('[WhatsAppChat] fetchChats called');
@@ -53,17 +109,14 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
       
       if (!response.ok) {
         console.error('[WhatsAppChat] API Error:', data.error);
-        setIsConnected(false);
         onDisconnected?.();
         return;
       }
       
       console.log('[WhatsAppChat] Chats received:', data.chats?.length);
       setChats(data.chats || []);
-      setIsConnected(true);
     } catch (error) {
       console.error('[WhatsAppChat] Error fetching chats:', error);
-      setIsConnected(false);
       onDisconnected?.();
     } finally {
       setIsLoadingChats(false);
@@ -127,13 +180,19 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
   };
 
   useEffect(() => {
-    fetchChats();
+    checkStatus();
 
     const eventSource = new EventSource('/api/whatsapp/events');
     eventSource.addEventListener('state', (event) => {
       const payload = JSON.parse(event.data);
       if (payload.state === 'connected') {
+        setConnectionStatus('connected');
         void fetchChats();
+      } else if (payload.state === 'qr') {
+        setConnectionStatus('qr');
+        void checkStatus(); // refresh qr code
+      } else {
+        setConnectionStatus(payload.state as ConnectionStatus);
       }
     });
 
@@ -179,6 +238,39 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
     return date.toLocaleDateString('es-ES');
   };
 
+  if (connectionStatus !== 'connected') {
+    return (
+      <Card className="w-full h-[600px] flex items-center justify-center">
+        <div className="text-center space-y-6 max-w-sm w-full p-6">
+          <MessageSquare className="w-16 h-16 mx-auto text-primary opacity-80" />
+          <h2 className="text-2xl font-bold">Conectar WhatsApp</h2>
+          
+          {connectionStatus === 'connecting' && (
+            <div className="space-y-4">
+              <Loader2 className="w-8 h-8 animate-spin mx-auto text-muted-foreground" />
+              <p className="text-muted-foreground">Estableciendo conexión...</p>
+            </div>
+          )}
+
+          {connectionStatus === 'qr' && qrCode && (
+            <div className="space-y-4">
+              <div className="bg-white p-4 rounded-xl inline-block border shadow-sm">
+                <QRCodeSVG value={qrCode} size={256} />
+              </div>
+              <p className="text-sm text-muted-foreground">Escanea el código QR con tu aplicación de WhatsApp para iniciar sesión.</p>
+            </div>
+          )}
+
+          {connectionStatus === 'disconnected' && (
+            <Button onClick={connectWhatsApp} className="w-full" size="lg">
+              Iniciar Sesión
+            </Button>
+          )}
+        </div>
+      </Card>
+    );
+  }
+
   return (
     <div className="flex h-[600px] gap-4">
       {/* Chats List */}
@@ -189,14 +281,25 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
               <MessageSquare className="w-5 h-5" />
               Chats
             </span>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={fetchChats}
-              disabled={isLoadingChats}
-            >
-              <RefreshCw className={`w-4 h-4 ${isLoadingChats ? 'animate-spin' : ''}`} />
-            </Button>
+            <div className="flex gap-1">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={fetchChats}
+                disabled={isLoadingChats}
+                title="Actualizar chats"
+              >
+                <RefreshCw className={`w-4 h-4 ${isLoadingChats ? 'animate-spin' : ''}`} />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={disconnectWhatsApp}
+                title="Desconectar WhatsApp"
+              >
+                <LogOut className="w-4 h-4 text-destructive" />
+              </Button>
+            </div>
           </CardTitle>
           <div className="relative">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-muted-foreground" />
@@ -213,10 +316,6 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
             {isLoadingChats ? (
               <div className="flex items-center justify-center h-40">
                 <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
-              </div>
-            ) : !isConnected ? (
-              <div className="p-4 text-center text-sm text-muted-foreground">
-                WhatsApp no está conectado
               </div>
             ) : filteredChats.length === 0 ? (
               <div className="p-4 text-center text-sm text-muted-foreground">

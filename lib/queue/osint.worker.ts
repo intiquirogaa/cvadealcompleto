@@ -1,6 +1,6 @@
 import { Worker, Job } from "bullmq";
 import { connection } from "./redis";
-import { OsintPlannerAgent } from "../osint/agents/osint-planner";
+import { OsintService } from "../osint/osint.service";
 import { prisma } from "../db";
 import { logger } from "../osint/core/observability/logger";
 
@@ -30,25 +30,29 @@ export const osintWorker = new Worker(
       }));
 
       try {
-        const client = await prisma.client.findUnique({ where: { id: clientId } });
+        const client = await prisma.cRMClient.findUnique({ where: { id: clientId } });
         if (!client) throw new Error("Client not found");
 
-        const targetEntity = {
-          id: client.id,
-          type: "Person" as const,
-          properties: {
-            name: client.name || undefined,
-            email: client.email || undefined,
-            phone: client.phone || undefined,
-          },
-          confidence: 1.0,
-        };
-
-        const planner = new OsintPlannerAgent(runId, targetEntity);
+        const osintService = new OsintService();
         
-        // Let's hook into the planner's logger to emit real-time events, 
-        // but for simplicity, we just run it and publish success
-        const result = await planner.execute();
+        // Let's publish progress as we go
+        await pubClient.publish(`osint-events:${runId}`, JSON.stringify({
+          type: "status",
+          status: "running",
+          message: "Buscando información en la web...",
+          timestamp: Date.now()
+        }));
+
+        const result = await osintService.enrich({
+          id: client.id,
+          firstName: client.firstName,
+          lastName: client.lastName,
+          email: client.email,
+          phone: client.phone,
+          locality: client.locality,
+          profession: client.profession || undefined,
+          company: client.company || undefined,
+        });
 
         // Publish success
         await pubClient.publish(`osint-events:${runId}`, JSON.stringify({
@@ -80,9 +84,9 @@ export const osintWorker = new Worker(
       const thirtyDaysAgo = new Date();
       thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
       
-      const staleClients = await prisma.client.findMany({
+      const staleClients = await prisma.cRMClient.findMany({
         where: {
-          updatedAt: {
+          lastEnriched: {
             lt: thirtyDaysAgo
           }
         },
@@ -91,7 +95,6 @@ export const osintWorker = new Worker(
 
       let queued = 0;
       for (const client of staleClients) {
-        // We import dynamically to avoid circular dependency if queue imports worker
         const { enqueueOsintRun } = await import("./osint.queue");
         const run = await prisma.osintRun.create({
           data: {
@@ -108,7 +111,7 @@ export const osintWorker = new Worker(
   },
   {
     connection,
-    concurrency: 5, // Run up to 5 investigations concurrently
+    concurrency: 5,
   }
 );
 
@@ -119,6 +122,3 @@ osintWorker.on("completed", (job) => {
 osintWorker.on("failed", (job, err) => {
   console.error(`[BullMQ] Job ${job?.id} failed with ${err.message}`);
 });
-
-// To run this standalone:
-// if (require.main === module) { console.log("Worker started"); }

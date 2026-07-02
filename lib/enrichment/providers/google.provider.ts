@@ -111,7 +111,7 @@ export class GoogleProvider extends BaseSearchProvider {
 
   private parseHtml(html: string): ProviderSearchResult[] {
     const results: ProviderSearchResult[] = [];
-    const algoRegex = /<div class="result__body[^>]*>([\s\S]*?)<\/div>(?=\s*<div class="result__body|\s*<\/div>\s*<\/div>)/g;
+    const algoRegex = /<div class="[^"]*result__body[^"]*"[^>]*>([\s\S]*?)<\/div>(?=\s*<div class="[^"]*result__body|\s*<\/div>\s*<\/div>)/g;
     let match;
 
     while ((match = algoRegex.exec(html)) !== null) {
@@ -133,7 +133,7 @@ export class GoogleProvider extends BaseSearchProvider {
         }
         
         // title can be found in result__title
-        const actualTitleMatch = /<h2 class="result__title"[^>]*><a[^>]*>([\s\S]*?)<\/a><\/h2>/.exec(block);
+        const actualTitleMatch = /<h2 class="result__title"[^>]*>\s*<a[^>]*>([\s\S]*?)<\/a>\s*<\/h2>/.exec(block);
         if (actualTitleMatch) {
           title = stripTags(actualTitleMatch[1]);
         }
