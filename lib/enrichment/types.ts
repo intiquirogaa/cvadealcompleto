@@ -178,4 +178,6 @@ export interface ClientInput {
   locality?: string;
   profession?: string;
   company?: string;
+  /** Free-text CRM notes — may contain disambiguating context (e.g. "se muda a Mendoza") that a plain name search can't find on its own. */
+  notes?: string;
 }

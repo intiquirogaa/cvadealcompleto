@@ -22,21 +22,18 @@ export async function enqueueOsintRun(runId: string, clientId: string, trigger: 
 }
 
 /**
- * Schedule a recurring job to re-enrich stale profiles every N days.
- * 
- * In a real production environment, you would have a separate worker 
- * picking this up, querying the DB for stale clients, and enqueueing 
- * individual `enqueueOsintRun` jobs for each one.
+ * Register the daily job that checks, per client, whether it's due for
+ * auto re-enrichment (autoEnrichEnabled + autoEnrichIntervalDays) or has a
+ * call reminder (nextContactDate) landing today. BullMQ dedupes repeatable
+ * jobs by jobId, so calling this on every worker boot is safe/idempotent.
  */
-export async function setupScheduledEnrichment(days: number = 30) {
-  // CRON expression for every N days (approximate via BullMQ repeatable jobs)
-  // or a simple cron like "0 0 */30 * *"
+export async function setupScheduledEnrichment() {
   return osintQueue.add(
     "scheduled-enrichment-batch",
     {},
     {
       repeat: {
-        pattern: "0 0 * * *", // Run daily at midnight to check for stale profiles
+        pattern: "0 9 * * *", // Daily at 09:00
       },
       jobId: "daily-enrichment-check",
     }

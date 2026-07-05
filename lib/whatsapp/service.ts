@@ -7,11 +7,18 @@ import makeWASocket, {
 import { Boom } from '@hapi/boom';
 import { clearSession as clearSessionDir, getSessionAuth } from './session';
 import { clearChats, handleChatUpdate } from './chats';
+import { addMessage, clearMessages, formatMessage } from './messages';
+import { addStatus, clearStatuses } from './statuses';
+import { updateContact } from './contacts';
 import type { ConnectionState as ConnState } from './types';
 
-class WhatsAppService extends EventEmitter {
-  private static instance: WhatsAppService | null = null;
+// WhatsApp Status updates ("Stories") are delivered as regular messages
+// addressed to this broadcast JID, not through a separate API — see
+// statuses.ts. Hardcoded (matches Baileys' own internal STORIES_JID)
+// rather than imported since it's just a string constant.
+const STATUS_BROADCAST_JID = 'status@broadcast';
 
+class WhatsAppService extends EventEmitter {
   private socket: WASocket | null = null;
   private connectionState: ConnState = 'disconnected';
   private qrCode: string | null = null;
@@ -20,16 +27,8 @@ class WhatsAppService extends EventEmitter {
   private reconnectAttempts = 0;
   private isDisconnecting = false;
 
-  private constructor() {
+  constructor() {
     super();
-  }
-
-  static getInstance(): WhatsAppService {
-    if (!WhatsAppService.instance) {
-      WhatsAppService.instance = new WhatsAppService();
-    }
-
-    return WhatsAppService.instance;
   }
 
   getConnectionState(): ConnState {
@@ -105,18 +104,11 @@ class WhatsAppService extends EventEmitter {
   async disconnect(): Promise<void> {
     this.isDisconnecting = true;
     this.clearReconnectTimer();
-
-    if (this.socket) {
-      try {
-        (this.socket as any).ws?.close?.();
-      } catch (error) {
-        console.error('[WhatsApp Service] Error closing socket:', error);
-      }
-    }
-
     this.clearSocket();
     this.qrCode = null;
     clearChats();
+    clearMessages();
+    clearStatuses();
     this.setConnectionState('disconnected');
   }
 
@@ -135,6 +127,8 @@ class WhatsAppService extends EventEmitter {
     this.clearSocket();
     this.qrCode = null;
     clearChats();
+    clearMessages();
+    clearStatuses();
     clearSessionDir();
     this.setConnectionState('disconnected');
   }
@@ -161,21 +155,50 @@ class WhatsAppService extends EventEmitter {
     socket.ev.on('messages.upsert', ({ messages, type }) => {
       if (type === 'notify') {
         messages.forEach((message: any) => {
+          if (message.key.remoteJid === STATUS_BROADCAST_JID) {
+            addStatus(message);
+          } else if (message.key.remoteJid) {
+            addMessage(message.key.remoteJid, formatMessage(message), message);
+          }
           this.emit('message', message);
         });
       }
     });
 
-    socket.ev.on('chats.set', (chats: any[]) => {
-      chats.forEach((chat: any) => handleChatUpdate(chat));
+    // Baileys v7 renamed the old `chats.set` bulk-history event to
+    // `messaging-history.set` — it never fires under the old name, which
+    // silently left the chat list (and message history) empty after every
+    // fresh QR pairing. This is the event that actually delivers chats +
+    // messages right after scanning. It also carries `contacts` (names for
+    // people you've never 1:1 chatted with — needed to label Status
+    // posters) and status@broadcast entries mixed into `chats`/`messages`,
+    // which get filtered out here instead of polluting the real chat list
+    // (confirmed live: it showed up as a fake chat literally named
+    // "status").
+    socket.ev.on('messaging-history.set', ({ chats, contacts, messages }) => {
+      contacts.forEach((contact: any) => updateContact(contact));
+      chats
+        .filter((chat: any) => chat.id !== STATUS_BROADCAST_JID)
+        .forEach((chat: any) => handleChatUpdate(chat));
+      messages.forEach((message: any) => {
+        if (message.key.remoteJid === STATUS_BROADCAST_JID) {
+          addStatus(message);
+        } else if (message.key.remoteJid) {
+          addMessage(message.key.remoteJid, formatMessage(message), message);
+        }
+      });
     });
 
     socket.ev.on('chats.upsert', (chats: any[]) => {
-      chats.forEach((chat: any) => handleChatUpdate(chat));
+      chats
+        .filter((chat: any) => chat.id !== STATUS_BROADCAST_JID)
+        .forEach((chat: any) => handleChatUpdate(chat));
     });
 
     socket.ev.on('chats.update', (chats: any[]) => {
-      chats.forEach((chat: any) => handleChatUpdate(chat));
+      chats
+        .filter((chat: any) => chat.id !== STATUS_BROADCAST_JID)
+        .forEach((chat: any) => handleChatUpdate(chat));
     });
   }
 
@@ -202,12 +225,37 @@ class WhatsAppService extends EventEmitter {
 
     if (connection === 'close') {
       const reason = (lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
-      const shouldReconnect = !this.isDisconnecting && reason !== DisconnectReason.loggedOut;
 
       this.clearSocket();
       this.qrCode = null;
       this.setConnectionState('disconnected');
 
+      if (this.isDisconnecting) {
+        return;
+      }
+
+      if (reason === DisconnectReason.restartRequired) {
+        // Baileys always closes the socket right after a QR gets scanned
+        // and requires a brand-new one to finish the handshake — this is
+        // guaranteed to happen on every fresh pairing, not a failure, so
+        // it always reconnects and isn't subject to the retry cap below
+        // (that cap is for real connection errors). Previously this fell
+        // through to scheduleReconnect(), which set state to 'connecting'
+        // *before* the timer fired — connect()'s own guard then saw that
+        // stale 'connecting' state and silently no-opped, so the
+        // reconnect never actually happened and pairing could never
+        // complete.
+        //
+        // A short delay (rather than reconnecting in the same tick) is
+        // still needed: reconnecting instantly raced the old socket's
+        // teardown on WhatsApp's server and got rejected with a 440
+        // "conflict/replaced" — confirmed live, it opened and got kicked
+        // in a loop every ~4s, never stabilizing.
+        setTimeout(() => void this.connect(), 1200);
+        return;
+      }
+
+      const shouldReconnect = reason !== DisconnectReason.loggedOut;
       if (shouldReconnect && this.reconnectAttempts < 1) {
         this.reconnectAttempts += 1;
         this.scheduleReconnect();
@@ -220,7 +268,6 @@ class WhatsAppService extends EventEmitter {
       return;
     }
 
-    this.setConnectionState('connecting');
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       void this.connect();
@@ -237,7 +284,16 @@ class WhatsAppService extends EventEmitter {
   private clearSocket(): void {
     if (this.socket) {
       try {
-        (this.socket as any).ws?.close?.();
+        // `end()` is Baileys' own graceful-teardown path (same one it
+        // calls internally on every disconnect) — it synchronously marks
+        // the socket closed and tears down its internal listeners before
+        // the network close finishes. A raw `ws.close()` skips all of
+        // that: WhatsApp's server can still consider the old socket "live"
+        // for a moment, and opening a new one right away for the same
+        // device got rejected with a 440 "conflict/replaced" error in a
+        // fast reconnect loop, confirmed live (reconnect → open → kicked
+        // by conflict → reconnect → ... every ~4s, never stabilizing).
+        (this.socket as any).end?.(new Error('Client reconnect'));
       } catch (error) {
         console.error('[WhatsApp Service] Error cleaning socket:', error);
       }
@@ -245,7 +301,7 @@ class WhatsAppService extends EventEmitter {
       try {
         this.socket.ev.removeAllListeners('connection.update');
         this.socket.ev.removeAllListeners('messages.upsert');
-        this.socket.ev.removeAllListeners('chats.set');
+        this.socket.ev.removeAllListeners('messaging-history.set');
         this.socket.ev.removeAllListeners('chats.upsert');
         this.socket.ev.removeAllListeners('chats.update');
       } catch (error) {
@@ -262,6 +318,25 @@ class WhatsAppService extends EventEmitter {
   }
 }
 
-export const whatsappService = WhatsAppService.getInstance();
+// Next.js dev compiles each API route into its own module graph on first
+// request — a plain module-level singleton (`let instance`) ends up
+// duplicated, one independent copy per route. Confirmed live: /connect,
+// /chats and /events each got their own WhatsAppService instance, so a
+// connection established via /connect was invisible to /chats (always
+// "not connected", never any chats) and to /events (SSE never reflected
+// the real state). `globalThis` is process-wide regardless of how many
+// module copies exist — same fix already used for the Prisma client in
+// lib/db.ts.
+const globalForWhatsApp = globalThis as unknown as {
+  whatsappService: WhatsAppService | undefined;
+};
+
+export const whatsappService =
+  globalForWhatsApp.whatsappService ?? new WhatsAppService();
+
+if (process.env.NODE_ENV !== 'production') {
+  globalForWhatsApp.whatsappService = whatsappService;
+}
+
 export type { ConnState as WhatsAppConnectionState };
 export default whatsappService;

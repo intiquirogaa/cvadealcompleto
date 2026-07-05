@@ -127,10 +127,10 @@ export class WebFetcherProvider extends BaseProvider {
       const testUrl = "https://httpbin.org/headers";
       const response = await ctx?.httpClient.httpFetch(testUrl, {
         method: "GET",
-        timeout: 5000,
+        timeoutMs: 5000,
         headers: { "User-Agent": this.getRandomUserAgent() }
       });
-      return response.status === 200;
+      return response?.status === 200;
     } catch {
       return false;
     }
@@ -165,11 +165,11 @@ export class WebFetcherProvider extends BaseProvider {
       const robotsUrl = `${domain}/robots.txt`;
       const response = await ctx.httpClient.httpFetch(robotsUrl, {
         method: "GET",
-        timeout: 5000,
+        timeoutMs: 5000,
         headers: { "User-Agent": this.getRandomUserAgent() }
       });
 
-      if (response.status !== 200) {
+      if (!response || response.status !== 200) {
         // No robots.txt = allowed
         const directives: RobotsDirectives = { allowed: true, disallowedPaths: [] };
         this.robotsCache.set(cacheKey, { directives, expiry: Date.now() + 3600000 }); // 1h cache
@@ -231,7 +231,7 @@ export class WebFetcherProvider extends BaseProvider {
   private async fetchPage(url: string, ctx: ProviderContext): Promise<string> {
     const response = await ctx.httpClient.httpFetch(url, {
       method: "GET",
-      timeout: ctx.config.timeoutMs,
+      timeoutMs: ctx.config.timeoutMs,
       headers: {
         "User-Agent": this.getRandomUserAgent(),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -241,6 +241,10 @@ export class WebFetcherProvider extends BaseProvider {
         "Connection": "keep-alive"
       }
     });
+
+    if (!response) {
+      throw new Error(`Web fetcher: request to ${url} failed or timed out`);
+    }
 
     if (response.status >= 400) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);

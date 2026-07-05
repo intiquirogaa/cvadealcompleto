@@ -249,6 +249,7 @@ model CRMClient {
   locality          String   @default("")
   propertiesInterest String[] @default([]) @map("properties_interest")
   stage             String   @default("new_lead") // new_lead, contacted, appointment_scheduled, advisory_done, negotiation, closed
+  relationshipStage String   @default("contacto_unico") @map("relationship_stage") // contacto_unico, en_conversacion, entrevista, presupuesto, seguimiento, compra, recomendacion
   nextContactDate   DateTime? @map("next_contact_date")
   nextContactNote   String?  @default("") @map("next_contact_note")
   notes             String   @default("")
@@ -260,6 +261,8 @@ model CRMClient {
   insights          String?  @default("")
   alerts            String?  @default("")
   lastEnriched      DateTime? @map("last_enriched")
+  autoEnrichEnabled Boolean  @default(false) @map("auto_enrich_enabled")
+  autoEnrichIntervalDays Int? @default(30) @map("auto_enrich_interval_days")
   conversationText       String?   @default("") @map("conversation_text")
   conversationSentiment  String?   @default("") @map("conversation_sentiment")
   conversationAnalysis   String?   @default("") @map("conversation_analysis")

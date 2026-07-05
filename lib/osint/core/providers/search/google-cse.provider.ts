@@ -77,12 +77,16 @@ export class GoogleCseProvider extends BaseProvider {
 
         const response = await ctx.httpClient.httpFetch(url, {
           method: "GET",
-          timeout: ctx.config.timeoutMs,
+          timeoutMs: ctx.config.timeoutMs,
           headers: {
             "User-Agent": "OSINT-Platform/1.0",
             "Accept": "application/json"
           }
         });
+
+        if (!response) {
+          throw new Error("Google CSE: request failed or timed out");
+        }
 
         if (response.status === 429) {
           throw new Error("Google CSE: Daily quota exceeded");
@@ -241,11 +245,11 @@ export class GoogleCseProvider extends BaseProvider {
       const testUrl = `${this.API_BASE}?${params.toString()}`;
       const response = await ctx?.httpClient.httpFetch(testUrl, {
         method: "GET",
-        timeout: 5000,
+        timeoutMs: 5000,
         headers: { "Accept": "application/json" }
       });
 
-      return response.status === 200;
+      return response?.status === 200;
     } catch (error) {
       return false;
     }

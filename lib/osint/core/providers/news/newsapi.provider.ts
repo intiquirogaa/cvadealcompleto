@@ -82,13 +82,17 @@ export class NewsApiProvider extends BaseProvider {
 
         const response = await ctx.httpClient.httpFetch(url, {
           method: "GET",
-          timeout: ctx.config.timeoutMs,
+          timeoutMs: ctx.config.timeoutMs,
           headers: {
             "Authorization": `Bearer ${ctx.config.apiKey || process.env.NEWSAPI_KEY}`,
             "User-Agent": "OSINT-Platform/1.0",
             "Accept": "application/json"
           }
         });
+
+        if (!response) {
+          throw new Error("NewsAPI: request failed or timed out");
+        }
 
         if (response.status === 401) {
           throw new Error("NewsAPI: Invalid or missing API key");
@@ -216,14 +220,14 @@ export class NewsApiProvider extends BaseProvider {
       const testUrl = `${this.API_BASE}/sources?pageSize=1`;
       const response = await ctx?.httpClient.httpFetch(testUrl, {
         method: "GET",
-        timeout: 5000,
+        timeoutMs: 5000,
         headers: {
           "Authorization": `Bearer ${apiKey}`,
           "Accept": "application/json"
         }
       });
 
-      return response.status === 200;
+      return response?.status === 200;
     } catch (error) {
       return false;
     }
@@ -241,12 +245,16 @@ export class NewsApiProvider extends BaseProvider {
     
     const response = await ctx.httpClient.httpFetch(url, {
       method: "GET",
-      timeout: ctx.config.timeoutMs,
+      timeoutMs: ctx.config.timeoutMs,
       headers: {
         "Authorization": `Bearer ${ctx.config.apiKey || process.env.NEWSAPI_KEY}`,
         "Accept": "application/json"
       }
     });
+
+    if (!response) {
+      throw new Error("NewsAPI: request failed or timed out");
+    }
 
     return JSON.parse(response.text);
   }

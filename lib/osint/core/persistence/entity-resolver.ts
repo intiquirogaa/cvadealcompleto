@@ -43,11 +43,38 @@ import {
  * natural key are considered the same entity (subject to merge).
  *
  * Format: `${type}:${deterministicKeyValue}`
+ *
+ * `crmClientId` scopes the key for entity types that represent facts
+ * about ONE SPECIFIC lead (person/phone/email/social_profile/address/
+ * position). Without it, graph-store.ts's upsertEntity() — keyed
+ * globally on {type, naturalKey} with no client column in the `where`
+ * clause — merges these across completely unrelated CRM clients: e.g.
+ * two different leads who happen to share a first+last name (or, as
+ * observed, a lead whose name collides with an unrelated public
+ * figure's real profile) would silently share the same `person`
+ * row, and a social_profile entity weakly matched during one client's
+ * investigation would keep whatever confidence/evidence a totally
+ * different client's investigation last wrote to that same row —
+ * `crmClientId` on that shared row even gets overwritten, so the
+ * entity's apparent "owner" could flip between clients. company/
+ * domain/website/news_item are deliberately left global — those
+ * represent facts about the world (a company, a domain, an article)
+ * that are legitimately meant to be shared/enriched across whichever
+ * leads happen to relate to them.
+ *
+ * `crmClientId` is only reliably set on `entity.crmClientId` right
+ * before persistToStore() (see KnowledgeGraph.setCrmClientId) — calls
+ * made earlier, during a single run's in-memory graph building, pass
+ * no clientId, which is fine since one run only ever concerns one
+ * client and the in-memory dedup doesn't need scoping.
  */
 export function computeNaturalKey(
   type: EntityType,
   properties: EntityProperties,
+  crmClientId?: string | null,
 ): string {
+  const scope = crmClientId ? `${crmClientId}:` : "";
+
   switch (type) {
     case "person": {
       const p = properties as PersonProperties;
@@ -55,7 +82,7 @@ export function computeNaturalKey(
         .toLowerCase()
         .trim()
         .replace(/\s+/g, " ");
-      return `person:${name}`;
+      return `person:${scope}${name}`;
     }
 
     case "company": {
@@ -69,17 +96,17 @@ export function computeNaturalKey(
 
     case "position": {
       const pos = properties as PositionProperties;
-      return `position:${pos.title.toLowerCase().trim()}`;
+      return `position:${scope}${pos.title.toLowerCase().trim()}`;
     }
 
     case "phone": {
       const ph = properties as PhoneProperties;
-      return `phone:${ph.digits || digitsOnly(ph.raw)}`;
+      return `phone:${scope}${ph.digits || digitsOnly(ph.raw)}`;
     }
 
     case "email": {
       const e = properties as EmailProperties;
-      return `email:${e.address.toLowerCase().trim()}`;
+      return `email:${scope}${e.address.toLowerCase().trim()}`;
     }
 
     case "domain": {
@@ -94,12 +121,12 @@ export function computeNaturalKey(
 
     case "social_profile": {
       const s = properties as SocialProfileProperties;
-      return `social_profile:${s.platform}:${s.username.toLowerCase().trim()}`;
+      return `social_profile:${scope}${s.platform}:${s.username.toLowerCase().trim()}`;
     }
 
     case "address": {
       const a = properties as AddressProperties;
-      return `address:${normalizeText(a.raw).toLowerCase().replace(/\s+/g, " ")}`;
+      return `address:${scope}${normalizeText(a.raw).toLowerCase().replace(/\s+/g, " ")}`;
     }
 
     case "news_item": {

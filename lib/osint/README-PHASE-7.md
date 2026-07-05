@@ -134,9 +134,44 @@ providerScoringEngine.logDecision(
 4. **proxycurl_linkedin** - Priority 75, $0.02/call
 5. **web_fetcher** - Priority 80, FREE
 
-### Legacy (Disabled)
-- bing_legacy - HTML scraping (deprecated)
-- duckduckgo_legacy - Unreliable scraping (deprecated)
+### Legacy / Free fallback (Enabled by default)
+- bing (id "bing", priority 30) - scraped via a real headless Chromium
+  (Playwright), not raw `fetch()` — bing.com serves generic/blocked content
+  to non-browser requests, which is what made this scraper unreliable before.
+- duckduckgo (id "duckduckgo", priority 30) - same headless-browser approach.
+
+These two + `web_fetcher` are what actually run when no paid API keys are
+configured — see `.env.example` at the repo root. They're real scrapers,
+not mocks, just more fragile than the paid APIs above.
+
+**Chromium dependency**: `bing`/`duckduckgo` share one headless browser
+instance (`lib/osint/core/infrastructure/browser-pool.ts`), launched lazily
+and reused for the life of the worker process — not relaunched per query.
+Requires the Chromium binary + system libs to be installed once per machine:
+`npx playwright install --with-deps chromium` (needs sudo for the apt
+dependencies). Without it, these two providers will fail to launch a page
+and the investigation falls back to whatever other providers are configured.
+The worker uses noticeably more RAM than before (a real browser vs. `fetch`).
+
+**Scope note**: this headless-browser approach is used only for search
+engines (Bing/DuckDuckGo). It is deliberately **not** used to scrape
+LinkedIn or other platforms whose Terms of Service explicitly prohibit
+automated access — `proxycurl_linkedin` (a paid, ToS-compliant API) remains
+the only supported path for LinkedIn data.
+
+## 🏃 **RUNNING THE WORKER**
+
+Providers only get exercised once the BullMQ worker process is running —
+`lib/queue/osint.worker.ts` is not started automatically by `next dev`/`next start`.
+
+- **Local dev**: `pnpm dev:all` runs Next.js and the worker together, or run
+  `pnpm run worker` in a separate terminal alongside `pnpm dev`. Requires a
+  reachable Redis (`REDIS_URL`, defaults to `redis://localhost:6379`).
+- **Production**: run `worker` as its own long-running process next to the
+  Next.js server (e.g. `pm2 start npm --name osint-worker -- run worker`, a
+  systemd unit, or a separate container/service in Docker Compose). There is
+  no serverless-compatible mode yet — a persistent Worker is required for
+  BullMQ jobs to be consumed.
 
 ## 📈 **ESCALABILIDAD A 20+ PROVIDERS**
 

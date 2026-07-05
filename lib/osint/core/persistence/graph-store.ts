@@ -112,6 +112,7 @@ const db = prisma as unknown as {
   osintRun: {
     create(args: Record<string, unknown>): Promise<RunRow>;
     update(args: Record<string, unknown>): Promise<RunRow>;
+    upsert(args: Record<string, unknown>): Promise<RunRow>;
     findUnique(args: Record<string, unknown>): Promise<RunRow | null>;
     findFirst(args: Record<string, unknown>): Promise<RunRow | null>;
     findMany(args: Record<string, unknown>): Promise<RunRow[]>;
@@ -271,6 +272,7 @@ export interface RunRecord {
 }
 
 export interface CreateRunInput {
+  id?: string;
   clientId: string;
   trigger: "manual" | "scheduled" | "webhook";
   triggeredBy: string;
@@ -303,7 +305,7 @@ export class GraphStore {
    * row is inserted.
    */
   async upsertEntity(entity: GraphEntity): Promise<GraphEntity> {
-    const naturalKey = computeNaturalKey(entity.type, entity.properties);
+    const naturalKey = computeNaturalKey(entity.type, entity.properties, entity.crmClientId);
     const data = entityToCreateData(entity, naturalKey);
 
     const row = await db.osintEntity.upsert({
@@ -464,11 +466,35 @@ export class GraphStore {
   async insertEvidenceBatch(records: EvidenceRecord[]): Promise<number> {
     if (records.length === 0) return 0;
     const data = records.map((ev) => evidenceToCreateData(ev));
-    const result = await db.osintEvidence.createMany({
-      data: data as never,
-      skipDuplicates: true,
-    });
-    return result.count;
+    try {
+      const result = await db.osintEvidence.createMany({
+        data: data as never,
+        skipDuplicates: true,
+      });
+      return result.count;
+    } catch (err) {
+      // createMany is all-or-nothing: one bad row (e.g. a dangling
+      // entityId) would otherwise silently drop every evidence record for
+      // the run. Fall back to inserting one at a time so a single bad
+      // reference doesn't take the rest down with it.
+      logger.warn("Evidence batch insert failed, retrying individually", {
+        count: records.length,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      let inserted = 0;
+      for (const ev of data) {
+        try {
+          await db.osintEvidence.create({ data: ev as never });
+          inserted++;
+        } catch (rowErr) {
+          logger.warn("Failed to insert evidence record", {
+            evidenceId: (ev as { id?: string }).id,
+            error: rowErr instanceof Error ? rowErr.message : String(rowErr),
+          });
+        }
+      }
+      return inserted;
+    }
   }
 
   /**
@@ -499,6 +525,26 @@ export class GraphStore {
    * Create a new investigation run.
    */
   async createRun(input: CreateRunInput): Promise<RunRecord> {
+    if (input.id) {
+      // A caller (API route, worker) may have already created a placeholder
+      // row with this id for SSE subscription purposes — reuse it instead
+      // of creating a second, disconnected run.
+      const row = await db.osintRun.upsert({
+        where: { id: input.id },
+        create: {
+          id: input.id,
+          clientId: input.clientId,
+          trigger: input.trigger,
+          triggeredBy: input.triggeredBy,
+          status: "running",
+        },
+        update: {
+          status: "running",
+        },
+      });
+      return rowToRun(row);
+    }
+
     const row = await db.osintRun.create({
       data: {
         clientId: input.clientId,
@@ -649,13 +695,21 @@ export class GraphStore {
    * Persist a batch of entities. Existing entities are updated,
    * new ones are inserted.  Uses sequential upsert to avoid
    * race conditions with Prisma's unique constraint handling.
+   *
+   * Returns a map from each input entity's *original* (in-memory) id to
+   * the id it actually has in the database. These differ whenever the
+   * entity's natural key already existed from an earlier run — Prisma's
+   * upsert() keeps the pre-existing row's id on update, it doesn't adopt
+   * the new one. Callers must remap relation/evidence foreign keys through
+   * this map before persisting them, or they'll point at an id that was
+   * never actually written (FK violation).
    */
-  async upsertEntitiesBatch(entities: GraphEntity[]): Promise<GraphEntity[]> {
-    const results: GraphEntity[] = [];
+  async upsertEntitiesBatch(entities: GraphEntity[]): Promise<Map<string, string>> {
+    const idMap = new Map<string, string>();
     for (const entity of entities) {
       try {
         const saved = await this.upsertEntity(entity);
-        results.push(saved);
+        idMap.set(entity.id, saved.id);
       } catch (err) {
         logger.warn("Failed to upsert entity", {
           entityId: entity.id,
@@ -664,7 +718,7 @@ export class GraphStore {
         });
       }
     }
-    return results;
+    return idMap;
   }
 
   /**

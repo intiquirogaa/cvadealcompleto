@@ -357,6 +357,59 @@ export function generateNameVariants(
   return variants;
 }
 
+/**
+ * Score how well a piece of candidate text (a social media username,
+ * display name, or page title) matches a person's name. Used to catch
+ * false-positive matches — e.g. `site:instagram.com "Lionel Messi"` can
+ * return a news outlet's own Instagram account just because their article
+ * mentions the name, not the person's actual profile.
+ *
+ * Returns 0 (no resemblance) to 1 (matches the strongest name variant).
+ */
+export function computeNameMatchScore(
+  candidateText: string,
+  firstName: string,
+  lastName: string
+): number {
+  if (!candidateText || !firstName || !lastName) return 0;
+
+  const candidateNormalized = normalizeText(candidateText);
+  const candidateSmushed = candidateNormalized.replace(/[\s._-]/g, "");
+  if (!candidateSmushed) return 0;
+
+  const candidateWords = new Set(
+    candidateNormalized.split(/[\s._-]+/).filter(Boolean)
+  );
+
+  let best = 0;
+  for (const variant of generateNameVariants(firstName, lastName)) {
+    const variantSmushed = variant.normalized.replace(/\s/g, "");
+    if (!variantSmushed) continue;
+
+    let score = 0;
+    if (candidateSmushed === variantSmushed) {
+      score = variant.strength;
+    } else if (
+      candidateSmushed.includes(variantSmushed) ||
+      variantSmushed.includes(candidateSmushed)
+    ) {
+      score = variant.strength * 0.75;
+    } else {
+      const variantTokens = variant.normalized.split(/\s+/).filter(Boolean);
+      if (
+        variantTokens.length > 0 &&
+        variantTokens.every((t) => candidateWords.has(t))
+      ) {
+        score = variant.strength * 0.6;
+      }
+    }
+
+    if (score > best) best = score;
+  }
+
+  return Math.min(1, best);
+}
+
 // ─────────────────────────────────────────────────────────────
 // EMAIL NORMALIZATION
 // ─────────────────────────────────────────────────────────────
@@ -532,4 +585,80 @@ export function computeAuthenticity(
     companyMatched,
     matchedVariants,
   };
+}
+
+// ─────────────────────────────────────────────────────────────
+// ARGENTINE REGIONS (shared between rule-based-reasoner.ts and
+// notes-signals.ts — was previously duplicated in the former only)
+// ─────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+// RESERVED SOCIAL PATH SEGMENTS (shared between social-agent.ts and
+// website-agent.ts — was previously only checked by the former's own
+// site: search results, not by the latter's regex link-scraping of
+// arbitrary fetched pages, letting e.g. "instagram.com/explore/..." or
+// "facebook.com/groups/..." through as if they were profile URLs)
+// ─────────────────────────────────────────────────────────────
+
+export const RESERVED_SOCIAL_PATH_SEGMENTS: Record<string, string[]> = {
+  instagram: ["reel", "reels", "p", "tv", "stories", "explore", "accounts", "direct"],
+  facebook: ["groups", "watch", "marketplace", "events", "pages", "help", "policies", "ads", "business", "photo"],
+};
+
+export const ARGENTINE_REGIONS = [
+  "ciudad autonoma de buenos aires", "caba", "buenos aires", "catamarca", "chaco",
+  "chubut", "cordoba", "corrientes", "entre rios", "formosa", "jujuy", "la pampa",
+  "la rioja", "mendoza", "misiones", "neuquen", "rio negro", "salta", "san juan",
+  "san luis", "santa cruz", "santa fe", "santiago del estero", "tierra del fuego",
+  "tucuman",
+];
+
+// ─────────────────────────────────────────────────────────────
+// NAME PROXIMITY (relevance gate — is this text really about the
+// target, or does it just happen to contain both name parts
+// somewhere unrelated?)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Checks whether firstName and lastName appear within maxWordDistance
+ * words of each other in text, instead of merely somewhere in the same
+ * (possibly huge) document. A generic "both words present" check lets
+ * totally unrelated pages through — e.g. a Flickr photo caption that
+ * happens to contain "Inti" (a common Andean given name/word) and
+ * "Quiroga" (a common Argentine surname) in unrelated sentences — which
+ * previously caused search-agent.ts and website-agent.ts to treat that
+ * page as being about the lead and extract garbage "evidence" from it
+ * (fake phone numbers pulled from a photo ID in the URL, in one observed
+ * case). Requiring proximity is a cheap, effective filter for this
+ * without needing a full NLP entity-linking pass.
+ */
+export function namesAppearNearby(
+  text: string,
+  firstName: string,
+  lastName: string,
+  maxWordDistance: number = 6,
+): boolean {
+  if (!text || !firstName || !lastName) return false;
+
+  const words = normalizeText(text).split(/\s+/).filter(Boolean);
+  const firstNormalized = normalizeText(firstName.trim().split(/\s+/)[0] ?? firstName);
+  const lastParts = new Set(
+    lastName.trim().split(/\s+/).filter(Boolean).map((p) => normalizeText(p)),
+  );
+
+  const firstPositions: number[] = [];
+  const lastPositions: number[] = [];
+  words.forEach((word, i) => {
+    if (word === firstNormalized) firstPositions.push(i);
+    if (lastParts.has(word)) lastPositions.push(i);
+  });
+
+  if (firstPositions.length === 0 || lastPositions.length === 0) return false;
+
+  for (const fp of firstPositions) {
+    for (const lp of lastPositions) {
+      if (Math.abs(fp - lp) <= maxWordDistance) return true;
+    }
+  }
+  return false;
 }

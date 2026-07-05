@@ -74,7 +74,7 @@ export class KnowledgeGraph {
    * maxed, evidence unioned).  Returns the canonical entity.
    */
   addEntity(entity: GraphEntity): GraphEntity {
-    const nk = computeNaturalKey(entity.type, entity.properties);
+    const nk = computeNaturalKey(entity.type, entity.properties, entity.crmClientId);
     const existingId = this.naturalKeyIndex.get(nk);
 
     if (existingId) {
@@ -289,6 +289,17 @@ export class KnowledgeGraph {
     return Array.from(this.entities.values());
   }
 
+  /**
+   * Stamp every entity currently in the graph with the CRM client it
+   * belongs to, so future runs can recall them via getEntitiesByCrmClient().
+   * Must be called before persistToStore().
+   */
+  setCrmClientId(clientId: string): void {
+    for (const entity of this.entities.values()) {
+      entity.crmClientId = clientId;
+    }
+  }
+
   get entityCount(): number {
     return this.entities.size;
   }
@@ -474,7 +485,7 @@ export class KnowledgeGraph {
     for (const entity of entities) {
       // Don't merge — these are the canonical DB records
       this.entities.set(entity.id, entity);
-      const nk = computeNaturalKey(entity.type, entity.properties);
+      const nk = computeNaturalKey(entity.type, entity.properties, entity.crmClientId);
       this.naturalKeyIndex.set(nk, entity.id);
     }
 
@@ -496,13 +507,26 @@ export class KnowledgeGraph {
    * Uses upsert so existing records are updated, new ones are inserted.
    */
   async persistToStore(store: GraphStore): Promise<void> {
-    await store.upsertEntitiesBatch(Array.from(this.entities.values()));
-    await store.upsertRelationsBatch(Array.from(this.relations.values()));
+    const idMap = await store.upsertEntitiesBatch(Array.from(this.entities.values()));
+    const remapId = (id: string) => idMap.get(id) ?? id;
 
-    // Insert evidence (skip already-persisted ones)
-    const newEvidence = Array.from(this.evidence.values());
-    if (newEvidence.length > 0) {
-      await store.insertEvidenceBatch(newEvidence);
+    // Recalled entities (memory reuse across runs) upsert onto an existing
+    // DB row that keeps its original id — relations/evidence built during
+    // this run still reference the fresh in-memory id, so they need
+    // remapping or they'd point at an id that was never actually written.
+    const relations = Array.from(this.relations.values()).map((rel) => ({
+      ...rel,
+      sourceId: remapId(rel.sourceId),
+      targetId: remapId(rel.targetId),
+    }));
+    await store.upsertRelationsBatch(relations);
+
+    const evidence = Array.from(this.evidence.values()).map((ev) => ({
+      ...ev,
+      entityId: ev.entityId ? remapId(ev.entityId) : ev.entityId,
+    }));
+    if (evidence.length > 0) {
+      await store.insertEvidenceBatch(evidence);
     }
   }
 

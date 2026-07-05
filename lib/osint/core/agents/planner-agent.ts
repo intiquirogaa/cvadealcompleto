@@ -186,6 +186,7 @@ export class PlannerAgent {
     let run: RunRecord;
     try {
       run = await this.store.createRun({
+        id: request.runId,
         clientId: request.clientId,
         trigger: request.trigger,
         triggeredBy: request.triggeredBy,
@@ -329,8 +330,9 @@ export class PlannerAgent {
 
       // ── Execute action ──
       const actionStart = Date.now();
+      const remainingMs = Math.max(this.config.maxDurationMs - elapsed, 1000);
       try {
-        await this.executeAction(bestAction);
+        await this.executeActionWithTimeout(bestAction, remainingMs);
         const actionDuration = Date.now() - actionStart;
         this.ctx.logger.debug("Action executed", {
           cycle,
@@ -476,8 +478,34 @@ export class PlannerAgent {
     const company = this.hints.company as string | undefined;
     const companyName = (this.hints.companyName as string | undefined) ?? company;
 
-    // Missing social profiles → SocialAgent
-    if (!existingTypes.has("social_profile") && firstName && lastName && personEntityId) {
+    // Missing social profiles → SocialAgent (the only agent wired to Apify
+    // enrichment). Gated on a *matched* profile, not mere type presence:
+    // WebsiteAgent creates low-confidence "social_profile" entities as a
+    // side effect of scraping any page (footer "follow us" links on an
+    // unrelated news site, or a link found while it directly page-fetches
+    // a social URL as a generic page). Those carry the name-match
+    // confidence computed in website-agent.ts/social-agent.ts (~12-20 for
+    // no/weak match, ~43+ for a real match) — gating on that value instead
+    // of raw presence stops one junk footer link from permanently starving
+    // SocialAgent out of every cycle that follows.
+    // A matched profile alone isn't enough to skip SocialAgent: if it's
+    // instagram/facebook and still missing the Apify enrichment fields
+    // (followers), SocialAgent needs to run again to pick it up from the
+    // graph and enrich it (see the matching block added in social-agent.ts) —
+    // otherwise a real profile found by WebsiteAgent's link-extraction would
+    // permanently block the only agent wired to Apify from ever enriching it.
+    const matchedSocialProfiles = this.graph
+      .getEntitiesByType("social_profile")
+      .filter((e) => e.confidence >= 40);
+    const needsApifyEnrichment = matchedSocialProfiles.some((e) => {
+      const props = e.properties as { platform?: string; followers?: number };
+      return (
+        (props.platform === "instagram" || props.platform === "facebook") &&
+        typeof props.followers !== "number"
+      );
+    });
+    const hasMatchedSocialProfile = matchedSocialProfiles.length > 0 && !needsApifyEnrichment;
+    if (!hasMatchedSocialProfile && firstName && lastName && personEntityId) {
       actions.push(this.makeRunAgentAction(
         AGENT_IDS.SOCIAL,
         { firstName, lastName, company, personEntityId },
@@ -567,6 +595,25 @@ export class PlannerAgent {
       action.discoveryProbability = discoveryProb;
       action.expectedFields = unfulfilledFields;
       action.eig = (unfulfilledFields.length * discoveryProb) / (action.estimatedQueries + 1);
+
+      // Floor for SocialAgent's gate-driven action (source "missing_type",
+      // see generateMissingTypeActions): every "fetch_page" suggestion's EIG
+      // is computed from WebsiteAgent's *entire* capability list (5 fields),
+      // regardless of whether that specific URL could plausibly deliver any
+      // of them — so a pile of speculative page fetches (a YouTube video, a
+      // Wikipedia mirror) each scores ~0.7 and structurally outranks the one
+      // targeted, near-certain action (a known profile URL, 1 query, real
+      // Apify payoff) at ~0.36. Observed directly in a live run's
+      // audit_trail_json: fetch_page candidates at 0.7 beat agent:social at
+      // 0.36 for all 8 cycles, so SocialAgent never got to run despite being
+      // the correct next step every single cycle. Rather than redesign the
+      // whole EIG model (which scores fetch_page off the owning agent's
+      // aggregate capabilities, not the specific URL), floor this one
+      // deterministic, cheap, gate-vetted action so it isn't drowned out by
+      // speculative ones.
+      if (action.agentId === AGENT_IDS.SOCIAL && action.source === "missing_type") {
+        action.eig = Math.max(action.eig, 1.0);
+      }
     }
 
     // Sort by EIG descending
@@ -603,8 +650,19 @@ export class PlannerAgent {
       case "person.github": {
         const platform = field.split(".")[1] as string;
         return this.graph.getEntitiesByType("social_profile").some((e) => {
-          const props = e.properties as { platform?: string };
-          return props.platform === platform;
+          const props = e.properties as { platform?: string; followers?: number };
+          if (props.platform !== platform) return false;
+          // instagram/facebook aren't "fulfilled" by URL discovery alone —
+          // Apify enrichment (followers/bio/etc, see social-agent.ts) is
+          // the actual payoff. Without this, EIG scoring sees the field as
+          // already satisfied the moment WebsiteAgent finds the link, so
+          // SocialAgent's action (generated by generateMissingTypeActions
+          // for exactly this "needs enrichment" case) scores near-zero EIG
+          // and never wins against the other pending actions.
+          if (platform === "instagram" || platform === "facebook") {
+            return typeof props.followers === "number";
+          }
+          return true;
         });
       }
       case "person.phone":
@@ -653,6 +711,52 @@ export class PlannerAgent {
   // ACTION EXECUTION
   // ═══════════════════════════════════════════════════════════
 
+  /**
+   * Races executeAction() against the investigation's remaining time
+   * budget. Without this, a single slow action (e.g. SocialAgent enriching
+   * several profiles via Apify, each up to 60s) could block the loop past
+   * maxDurationMs — the budget check at the top of runAdaptiveLoop() only
+   * runs *between* cycles, so it never caught an action already in flight.
+   * Confirmed in testing: one run blew a 60s budget by 5x+ (330s) this way.
+   *
+   * This bounds how long the *loop* waits, not how long the action itself
+   * runs — providers are called via plain fetch with no AbortController
+   * threaded through, so a timed-out action keeps running in the
+   * background until it naturally finishes (or its own provider-level
+   * timeout fires). That's a real limitation, not a full fix, but it's
+   * enough to guarantee the investigation as a whole returns within its
+   * configured budget instead of hanging on whatever the slowest agent
+   * happens to do.
+   */
+  private async executeActionWithTimeout(action: PlannerAction, timeoutMs: number): Promise<void> {
+    const actionPromise = this.executeAction(action);
+
+    // Attach a no-op catch so a late failure from the orphaned execution
+    // (still running after we've already moved on) doesn't surface as an
+    // unhandled promise rejection.
+    actionPromise.catch((err) => {
+      this.ctx.logger.warn("Action failed after its budget timeout had already elapsed", {
+        actionId: action.id,
+        agentId: action.agentId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+
+    let timer: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`Action ${action.id} (${action.agentId}) exceeded remaining time budget (${timeoutMs}ms)`)),
+        timeoutMs,
+      );
+    });
+
+    try {
+      await Promise.race([actionPromise, timeout]);
+    } finally {
+      clearTimeout(timer!);
+    }
+  }
+
   private async executeAction(action: PlannerAction): Promise<void> {
     this.executedActionKeys.add(action.id);
 
@@ -664,7 +768,11 @@ export class PlannerAgent {
 
     const input: AgentInput = {
       targetId: (this.hints.clientId as string) ?? "unknown",
-      hints: action.hints,
+      // Merge the investigation-wide hints (firstName/lastName/company/...)
+      // under the action-specific ones — agents like WebsiteAgent only ever
+      // received the fetch_page suggestion's own params before, with no
+      // way to know whose name to match extracted social links against.
+      hints: { ...this.hints, ...action.hints },
     };
 
     const output = await agent.run(input, this.ctx);
@@ -811,6 +919,14 @@ export class PlannerAgent {
     const address = normalizeEmail(rawEmail);
     if (!address) return;
 
+    // Finding a page that mentions the client's OWN already-known email is
+    // a real confirmation the page is about them — a much stronger signal
+    // than "some email address appeared on some page we fetched", which is
+    // all the flat confidence of 55 used to represent regardless of source.
+    const knownEmail = normalizeEmail((this.hints.email as string | undefined) ?? "");
+    const isConfirmation = !!knownEmail && knownEmail === address;
+    const confidence = isConfirmation ? 90 : 55;
+
     const dom = emailDomain(address);
     const props: EmailProperties = {
       address,
@@ -820,13 +936,13 @@ export class PlannerAgent {
       isVerified: false,
     };
 
-    const entity = this.makeEntity("email", props, 55);
+    const entity = this.makeEntity("email", props, confidence);
     this.graph.addEntity(entity);
 
     // Link to person
     const personId = this.hints.personEntityId as string | undefined;
     if (personId) {
-      this.graph.addRelation(this.makeRelation("HAS_EMAIL", personId, entity.id, 55));
+      this.graph.addRelation(this.makeRelation("HAS_EMAIL", personId, entity.id, confidence));
     }
 
     // Create evidence
@@ -852,6 +968,13 @@ export class PlannerAgent {
     const digits = digitsOnly(rawPhone);
     if (digits.length < 8 || digits.length > 15) return;
 
+    // Same reasoning as createEmailEntity: a match against the client's
+    // own already-known phone is a real confirmation, not just "some
+    // digit run appeared somewhere".
+    const knownDigits = digitsOnly((this.hints.phone as string | undefined) ?? "");
+    const isConfirmation = knownDigits.length >= 8 && (digits.includes(knownDigits) || knownDigits.includes(digits));
+    const confidence = isConfirmation ? 85 : 50;
+
     const props: PhoneProperties = {
       raw: rawPhone,
       digits,
@@ -860,13 +983,13 @@ export class PlannerAgent {
       type: "unknown",
     };
 
-    const entity = this.makeEntity("phone", props, 50);
+    const entity = this.makeEntity("phone", props, confidence);
     this.graph.addEntity(entity);
 
     // Link to person
     const personId = this.hints.personEntityId as string | undefined;
     if (personId) {
-      this.graph.addRelation(this.makeRelation("HAS_PHONE", personId, entity.id, 50));
+      this.graph.addRelation(this.makeRelation("HAS_PHONE", personId, entity.id, confidence));
     }
 
     // Create evidence
@@ -948,15 +1071,15 @@ export class PlannerAgent {
       }
     }
 
+    // Set CRM client ID on entities for future memory recall
+    this.graph.setCrmClientId(request.clientId);
+
     // Persist graph to DB
     try {
       await this.graph.persistToStore(this.store);
     } catch (err) {
       this.ctx.logger.error("Failed to persist graph", { error: String(err) });
     }
-
-    // Set CRM client ID on entities for future memory recall
-    // (handled by GraphStore upsert with clientId)
 
     // Build profile views
     const personEntity = this.graph.getEntitiesByType("person")[0];
@@ -1169,7 +1292,7 @@ export class PlannerAgent {
       expectedFields: [],
       estimatedQueries,
       estimatedCost: 0,
-      discoveryProbability: AGENT_DISCOVERY_PROB[agentId] ?? 0.5,
+      discoveryProbability: strategyOptimizer.getDiscoveryProbabilitiesSync()[agentId] ?? 0.5,
       eig: 0, // Computed in scoreActions
       rationale,
       source,

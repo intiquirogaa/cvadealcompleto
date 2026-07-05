@@ -1,11 +1,7 @@
 import { BaseSearchProvider, ProviderSearchResult } from "./base.provider";
+import { browserPool } from "../../osint/core/infrastructure/browser-pool";
 
 const SEARCH_URL = "https://html.duckduckgo.com/html/";
-const USER_AGENTS = [
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-];
 
 const htmlCache = new Map<string, string>();
 const MAX_CONCURRENT = 5;
@@ -67,36 +63,43 @@ export class GoogleProvider extends BaseSearchProvider {
       const params = new URLSearchParams({
         q: query,
       });
-      const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+      const url = `${SEARCH_URL}?${params}`;
 
       console.log(`[GoogleProvider] Executing query (attempt ${attempt}): "${query}"`);
       const startTime = Date.now();
 
-      const res = await fetch(`${SEARCH_URL}?${params}`, {
-        headers: {
-          "User-Agent": userAgent,
-          "Accept-Language": "es-419,es;q=0.9,en;q=0.8",
-        },
-        signal: AbortSignal.timeout(10000),
+      // Navigated with a real headless browser (not raw fetch) for the same
+      // bot-detection reasons as BingProvider.
+      const html = await browserPool.withPage(async (page) => {
+        const response = await page.goto(url, {
+          waitUntil: "domcontentloaded",
+          timeout: 10000,
+        });
+        if (response && response.status() === 429) {
+          throw Object.assign(new Error("Search fetch failed: 429"), { status: 429 });
+        }
+        if (response && !response.ok()) {
+          throw Object.assign(
+            new Error(`Search fetch failed: ${response.status()}`),
+            { status: response.status() }
+          );
+        }
+        await page.waitForSelector(".result__body", { timeout: 5000 }).catch(() => {});
+        return page.content();
       });
 
-      if (!res.ok) {
-        if (res.status === 429 && attempt <= 3) {
-          console.warn(`[GoogleProvider] Rate limited (429) for "${query}". Retrying in ${attempt * 2}s...`);
-          release();
-          await delay(attempt * 2000);
-          return this.fetchHtml(query, attempt + 1);
-        }
-        throw new Error(`Search fetch failed: ${res.status}`);
-      }
-
-      const html = await res.text();
       htmlCache.set(query, html);
 
       console.log(`[GoogleProvider] Query "${query}" finished in ${Date.now() - startTime}ms`);
       return html;
     } catch (err: any) {
-      if (err.name === "TimeoutError" && attempt <= 2) {
+      if (err.status === 429 && attempt <= 3) {
+        console.warn(`[GoogleProvider] Rate limited (429) for "${query}". Retrying in ${attempt * 2}s...`);
+        release();
+        await delay(attempt * 2000);
+        return this.fetchHtml(query, attempt + 1);
+      }
+      if ((err.name === "TimeoutError" || /timeout/i.test(err.message ?? "")) && attempt <= 2) {
         console.warn(`[GoogleProvider] Timeout for "${query}". Retrying in 2s...`);
         release();
         await delay(2000);

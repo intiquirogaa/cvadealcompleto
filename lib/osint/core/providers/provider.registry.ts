@@ -178,11 +178,12 @@ export class ProviderRegistry {
     const selection = await this.selectProviders(context);
     const allProviders = [selection.primary, ...selection.fallbacks];
     const executionResults: ProviderExecutionResult[] = [];
-    
-    for (const provider of allProviders) {
+
+    for (let i = 0; i < allProviders.length; i++) {
+      const provider = allProviders[i];
       const startTime = Date.now();
       const providerContext = this.getContext(provider.id);
-      
+
       if (!providerContext) {
         executionResults.push({
           providerId: provider.id,
@@ -197,7 +198,7 @@ export class ProviderRegistry {
       try {
         const results = await provider.search(query, providerContext);
         const durationMs = Date.now() - startTime;
-        
+
         const executionResult: ProviderExecutionResult = {
           providerId: provider.id,
           success: true,
@@ -205,9 +206,24 @@ export class ProviderRegistry {
           results,
           cost: provider.estimateCost ? provider.estimateCost(query) : provider.costPerRequest || 0
         };
-        
+
         executionResults.push(executionResult);
-        
+
+        // A provider that returns zero results didn't actually answer the
+        // query — treating that as final (as this used to) stops the chain
+        // before providers further down (often a better-ranked one like
+        // SerpApi) ever get a turn. Keep going unless this was the last
+        // candidate, matching the "only stop on results.length > 0" rule
+        // legacySearchProviders() already followed.
+        const isLastProvider = i === allProviders.length - 1;
+        if (results.length === 0 && !isLastProvider) {
+          rootLogger.warn("Provider returned no results, trying next", {
+            providerId: provider.id,
+            durationMs
+          });
+          continue;
+        }
+
         // Log successful execution
         providerScoringEngine.logDecision(
           context.capability,
@@ -216,14 +232,14 @@ export class ProviderRegistry {
           executionResults,
           provider.id
         );
-        
+
         return {
           results,
           executedProvider: provider.id,
           executionResults,
           fallbacksUsed: executionResults.length - 1
         };
-        
+
       } catch (error) {
         const durationMs = Date.now() - startTime;
         const executionResult: ProviderExecutionResult = {

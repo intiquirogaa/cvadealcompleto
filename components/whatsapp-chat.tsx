@@ -5,8 +5,9 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { Send, Loader2, MessageSquare, Search, RefreshCw, LogOut } from 'lucide-react';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
+import { Send, Loader2, MessageSquare, Search, RefreshCw, LogOut, Smile, FileText, Download, X } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 
 type ConnectionStatus = 'disconnected' | 'connecting' | 'qr' | 'connected';
@@ -20,12 +21,292 @@ interface Chat {
   timestamp: number | null;
 }
 
+type MediaType = 'image' | 'video' | 'audio' | 'document' | 'sticker';
+
 interface Message {
   id: string;
   fromMe: boolean;
   body: string;
   timestamp: number;
   author: string;
+  mediaType?: MediaType;
+  mimetype?: string;
+  fileName?: string;
+  width?: number;
+  height?: number;
+}
+
+interface StatusUpdate {
+  id: string;
+  posterJid: string;
+  posterName: string;
+  timestamp: number;
+  body: string;
+  mediaType?: MediaType;
+  mimetype?: string;
+  width?: number;
+  height?: number;
+}
+
+interface StatusGroup {
+  posterJid: string;
+  posterName: string;
+  updates: StatusUpdate[];
+}
+
+// Profile pictures are lazy-fetched per row via IntersectionObserver (there
+// are 1714+ chats in a real account — fetching all of them eagerly would
+// hammer the WhatsApp API and jank up the initial render) and cached here
+// so scrolling back up doesn't re-fetch what's already resolved.
+const avatarUrlCache = new Map<string, string | null>();
+
+function ChatAvatar({
+  jid,
+  name,
+  className,
+}: {
+  jid: string;
+  name: string;
+  className?: string;
+}) {
+  const [url, setUrl] = useState<string | null>(avatarUrlCache.get(jid) ?? null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (avatarUrlCache.has(jid)) return;
+    const el = containerRef.current;
+    if (!el) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries[0].isIntersecting) return;
+        observer.disconnect();
+        fetch(`/api/whatsapp/avatar?jid=${encodeURIComponent(jid)}`)
+          .then((res) => res.json())
+          .then((data) => {
+            avatarUrlCache.set(jid, data.url ?? null);
+            setUrl(data.url ?? null);
+          })
+          .catch(() => avatarUrlCache.set(jid, null));
+      },
+      { rootMargin: '150px' }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [jid]);
+
+  return (
+    <div ref={containerRef}>
+      <Avatar className={className}>
+        {url && <AvatarImage src={url} alt={name} />}
+        <AvatarFallback>{name.charAt(0).toUpperCase()}</AvatarFallback>
+      </Avatar>
+    </div>
+  );
+}
+
+const COMMON_EMOJIS = [
+  '😀', '😂', '🥰', '😍', '😊', '😉', '😎', '🤔',
+  '😢', '😭', '😡', '🥳', '😴', '🤗', '👍', '👎',
+  '👏', '🙏', '💪', '🔥', '✨', '🎉', '❤️', '💔',
+  '👀', '✅', '❌', '⚠️', '📌', '💬', '☕', '🍕',
+];
+
+function EmojiPicker({ onSelect }: { onSelect: (emoji: string) => void }) {
+  return (
+    <PopoverContent className="w-64 p-2" align="end">
+      <div className="grid grid-cols-8 gap-1">
+        {COMMON_EMOJIS.map((emoji) => (
+          <button
+            key={emoji}
+            type="button"
+            onClick={() => onSelect(emoji)}
+            className="text-xl p-1 rounded hover:bg-muted transition-colors"
+          >
+            {emoji}
+          </button>
+        ))}
+      </div>
+    </PopoverContent>
+  );
+}
+
+function MessageContent({
+  message,
+  onOpenLightbox,
+}: {
+  message: Message;
+  onOpenLightbox: () => void;
+}) {
+  const mediaUrl = message.mediaType
+    ? `/api/whatsapp/media?id=${encodeURIComponent(message.id)}`
+    : null;
+
+  switch (message.mediaType) {
+    case 'image':
+      return (
+        <div className="space-y-1">
+          <img
+            src={mediaUrl!}
+            alt={message.body || 'Imagen'}
+            onClick={onOpenLightbox}
+            className="rounded-lg max-w-[240px] max-h-[240px] object-cover cursor-pointer"
+          />
+          {message.body && (
+            <p className="text-sm whitespace-pre-wrap">{message.body}</p>
+          )}
+        </div>
+      );
+    case 'sticker':
+      return (
+        <img src={mediaUrl!} alt="Sticker" className="w-28 h-28 object-contain" />
+      );
+    case 'video':
+      return (
+        <div className="space-y-1">
+          <video
+            src={mediaUrl!}
+            controls
+            className="rounded-lg max-w-[240px] max-h-[240px] cursor-pointer"
+            onClick={onOpenLightbox}
+          />
+          {message.body && (
+            <p className="text-sm whitespace-pre-wrap">{message.body}</p>
+          )}
+        </div>
+      );
+    case 'audio':
+      return <audio src={mediaUrl!} controls className="max-w-[240px]" />;
+    case 'document':
+      return (
+        <a
+          href={mediaUrl!}
+          download={message.fileName || 'documento'}
+          className="flex items-center gap-2 p-2 rounded-lg bg-black/10 hover:bg-black/20 transition-colors"
+        >
+          <FileText className="w-8 h-8 flex-shrink-0" />
+          <span className="text-sm truncate">{message.fileName || 'Documento'}</span>
+          <Download className="w-4 h-4 flex-shrink-0 ml-auto" />
+        </a>
+      );
+    default:
+      return <p className="text-sm whitespace-pre-wrap">{message.body}</p>;
+  }
+}
+
+function Lightbox({ message, onClose }: { message: Message; onClose: () => void }) {
+  const mediaUrl = `/api/whatsapp/media?id=${encodeURIComponent(message.id)}`;
+  return (
+    <div
+      className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-8"
+      onClick={onClose}
+    >
+      <button
+        onClick={onClose}
+        className="absolute top-4 right-4 text-white hover:text-gray-300"
+      >
+        <X className="w-8 h-8" />
+      </button>
+      {message.mediaType === 'video' ? (
+        <video
+          src={mediaUrl}
+          controls
+          autoPlay
+          className="max-w-full max-h-full"
+          onClick={(e) => e.stopPropagation()}
+        />
+      ) : (
+        <img
+          src={mediaUrl}
+          alt={message.body || 'Imagen'}
+          className="max-w-full max-h-full object-contain"
+          onClick={(e) => e.stopPropagation()}
+        />
+      )}
+    </div>
+  );
+}
+
+function StatusViewer({
+  group,
+  onClose,
+}: {
+  group: StatusGroup;
+  onClose: () => void;
+}) {
+  const [index, setIndex] = useState(0);
+  const current = group.updates[index];
+  const mediaUrl = `/api/whatsapp/media?id=${encodeURIComponent(current.id)}`;
+
+  const goNext = () => {
+    if (index < group.updates.length - 1) setIndex(index + 1);
+    else onClose();
+  };
+  const goPrev = () => {
+    if (index > 0) setIndex(index - 1);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/95 z-50 flex flex-col items-center justify-center p-4">
+      <div className="absolute top-4 left-4 right-4 flex items-center gap-3 text-white">
+        <div className="flex-1 flex gap-1">
+          {group.updates.map((_, i) => (
+            <div key={i} className="flex-1 h-1 rounded-full bg-white/30 overflow-hidden">
+              <div
+                className="h-full bg-white transition-all"
+                style={{ width: i < index ? '100%' : i === index ? '100%' : '0%' }}
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="absolute top-10 left-4 flex items-center gap-2 text-white">
+        <span className="font-medium text-sm">{group.posterName}</span>
+      </div>
+      <button
+        onClick={onClose}
+        className="absolute top-4 right-4 text-white hover:text-gray-300"
+      >
+        <X className="w-8 h-8" />
+      </button>
+
+      <div className="flex items-center justify-center gap-2 w-full max-w-2xl">
+        <button
+          onClick={goPrev}
+          disabled={index === 0}
+          className="text-white disabled:opacity-20 p-2"
+        >
+          ‹
+        </button>
+        <div className="flex-1 flex flex-col items-center gap-2">
+          {current.mediaType === 'video' ? (
+            <video
+              src={mediaUrl}
+              controls
+              autoPlay
+              className="max-h-[70vh] max-w-full rounded-lg"
+            />
+          ) : current.mediaType === 'image' ? (
+            <img
+              src={mediaUrl}
+              alt={current.body || 'Estado'}
+              className="max-h-[70vh] max-w-full object-contain rounded-lg"
+            />
+          ) : (
+            <div className="bg-muted text-foreground rounded-lg p-8 max-w-md text-center">
+              {current.body || '(sin contenido)'}
+            </div>
+          )}
+          {current.body && current.mediaType && (
+            <p className="text-white text-sm">{current.body}</p>
+          )}
+        </div>
+        <button onClick={goNext} className="text-white p-2">
+          ›
+        </button>
+      </div>
+    </div>
+  );
 }
 
 interface WhatsAppChatProps {
@@ -43,7 +324,14 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [qrCode, setQrCode] = useState<string | null>(null);
+  const [lightboxMessage, setLightboxMessage] = useState<Message | null>(null);
+  const [statusGroups, setStatusGroups] = useState<StatusGroup[]>([]);
+  const [viewingStatusGroup, setViewingStatusGroup] = useState<StatusGroup | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const insertEmoji = (emoji: string) => {
+    setNewMessage((prev) => prev + emoji);
+  };
 
   console.log('[WhatsAppChat] Component mounted');
 
@@ -54,6 +342,7 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
       if (data.status === 'connected') {
         setConnectionStatus('connected');
         fetchChats();
+        fetchStatusGroups();
       } else if (data.status === 'qr' && data.qrCode) {
         setConnectionStatus('qr');
         setQrCode(data.qrCode);
@@ -106,13 +395,13 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
       const response = await fetch('/api/whatsapp/chats');
       const data = await response.json();
       console.log('[WhatsAppChat] Response:', data);
-      
+
       if (!response.ok) {
         console.error('[WhatsAppChat] API Error:', data.error);
         onDisconnected?.();
         return;
       }
-      
+
       console.log('[WhatsAppChat] Chats received:', data.chats?.length);
       setChats(data.chats || []);
     } catch (error) {
@@ -120,6 +409,17 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
       onDisconnected?.();
     } finally {
       setIsLoadingChats(false);
+    }
+  };
+
+  const fetchStatusGroups = async () => {
+    try {
+      const response = await fetch('/api/whatsapp/statuses');
+      if (!response.ok) return;
+      const data = await response.json();
+      setStatusGroups(data.groups || []);
+    } catch (error) {
+      console.error('[WhatsAppChat] Error fetching statuses:', error);
     }
   };
 
@@ -188,6 +488,7 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
       if (payload.state === 'connected') {
         setConnectionStatus('connected');
         void fetchChats();
+        void fetchStatusGroups();
       } else if (payload.state === 'qr') {
         setConnectionStatus('qr');
         void checkStatus(); // refresh qr code
@@ -200,6 +501,7 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
       if (selectedChat) {
         void fetchMessages(selectedChat.id);
       }
+      void fetchStatusGroups();
     });
 
     return () => {
@@ -272,9 +574,28 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
   }
 
   return (
+    <div className="flex flex-col gap-3">
+      {statusGroups.length > 0 && (
+        <div className="flex gap-3 overflow-x-auto pb-1">
+          {statusGroups.map((group) => (
+            <button
+              key={group.posterJid}
+              onClick={() => setViewingStatusGroup(group)}
+              className="flex flex-col items-center gap-1 flex-shrink-0 w-16"
+            >
+              <div className="p-0.5 rounded-full ring-2 ring-primary">
+                <ChatAvatar jid={group.posterJid} name={group.posterName} className="h-14 w-14" />
+              </div>
+              <span className="text-xs truncate w-full text-center">
+                {group.posterName}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
     <div className="flex h-[600px] gap-4">
       {/* Chats List */}
-      <Card className="w-80 flex flex-col">
+      <Card className="w-80 flex flex-col min-h-0">
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center justify-between">
             <span className="flex items-center gap-2">
@@ -311,7 +632,7 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
             />
           </div>
         </CardHeader>
-        <CardContent className="flex-1 overflow-hidden p-0">
+        <CardContent className="flex-1 overflow-hidden p-0 min-h-0">
           <ScrollArea className="h-full">
             {isLoadingChats ? (
               <div className="flex items-center justify-center h-40">
@@ -334,11 +655,7 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
                     }`}
                   >
                     <div className="flex items-start gap-3">
-                      <Avatar className="h-10 w-10">
-                        <AvatarFallback>
-                          {chat.name.charAt(0).toUpperCase()}
-                        </AvatarFallback>
-                      </Avatar>
+                      <ChatAvatar jid={chat.id} name={chat.name} className="h-10 w-10" />
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center justify-between mb-1">
                           <span className="font-medium truncate text-sm">
@@ -371,16 +688,12 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
       </Card>
 
       {/* Chat View */}
-      <Card className="flex-1 flex flex-col">
+      <Card className="flex-1 flex flex-col min-h-0">
         {selectedChat ? (
           <>
             <CardHeader className="pb-3 border-b">
               <CardTitle className="flex items-center gap-3">
-                <Avatar className="h-10 w-10">
-                  <AvatarFallback>
-                    {selectedChat.name.charAt(0).toUpperCase()}
-                  </AvatarFallback>
-                </Avatar>
+                <ChatAvatar jid={selectedChat.id} name={selectedChat.name} className="h-10 w-10" />
                 <div>
                   <div className="font-medium">{selectedChat.name}</div>
                   <div className="text-xs text-muted-foreground">
@@ -389,7 +702,7 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
                 </div>
               </CardTitle>
             </CardHeader>
-            <CardContent className="flex-1 flex flex-col p-0">
+            <CardContent className="flex-1 flex flex-col p-0 min-h-0">
               <ScrollArea className="flex-1 p-4">
                 {isLoadingMessages ? (
                   <div className="flex items-center justify-center h-40">
@@ -418,7 +731,10 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
                               {message.author}
                             </div>
                           )}
-                          <p className="text-sm whitespace-pre-wrap">{message.body}</p>
+                          <MessageContent
+                            message={message}
+                            onOpenLightbox={() => setLightboxMessage(message)}
+                          />
                           <div className="text-xs opacity-70 mt-1 text-right">
                             {formatTimestamp(message.timestamp)}
                           </div>
@@ -431,6 +747,14 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
               </ScrollArea>
               <div className="border-t p-4">
                 <div className="flex gap-2">
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <Button variant="ghost" size="icon" disabled={isSending}>
+                        <Smile className="w-5 h-5" />
+                      </Button>
+                    </PopoverTrigger>
+                    <EmojiPicker onSelect={insertEmoji} />
+                  </Popover>
                   <Input
                     placeholder="Escribe un mensaje..."
                     value={newMessage}
@@ -461,6 +785,14 @@ export function WhatsAppChat({ onDisconnected }: WhatsAppChatProps) {
           </CardContent>
         )}
       </Card>
+    </div>
+
+      {lightboxMessage && (
+        <Lightbox message={lightboxMessage} onClose={() => setLightboxMessage(null)} />
+      )}
+      {viewingStatusGroup && (
+        <StatusViewer group={viewingStatusGroup} onClose={() => setViewingStatusGroup(null)} />
+      )}
     </div>
   );
 }

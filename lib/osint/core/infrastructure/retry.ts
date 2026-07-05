@@ -17,7 +17,8 @@ export interface RetryConfig {
   maxRetries: number;
   backoffBaseMs: number;
   backoffMaxMs: number;
-  jitterMs: number;
+  /** Defaults to 1000ms when omitted (e.g. callers passing a ProviderRuntimeConfig). */
+  jitterMs?: number;
 }
 
 export const DEFAULT_RETRY_CONFIG: RetryConfig = {
@@ -72,7 +73,7 @@ export function computeBackoffDelay(
 ): number {
   const exponential = config.backoffBaseMs * Math.pow(2, attempt);
   const capped = Math.min(config.backoffMaxMs, exponential);
-  const jitter = Math.random() * config.jitterMs;
+  const jitter = Math.random() * (config.jitterMs ?? 1000);
   return Math.round(capped + jitter);
 }
 

@@ -165,12 +165,16 @@ export class ProxycurlLinkedInProvider extends BaseProvider {
 
     const response = await ctx.httpClient.httpFetch(url, {
       method: "GET",
-      timeout: ctx.config.timeoutMs,
+      timeoutMs: ctx.config.timeoutMs,
       headers: {
         "Authorization": `Bearer ${ctx.config.apiKey || process.env.PROXYCURL_API_KEY}`,
         "Accept": "application/json"
       }
     });
+
+    if (!response) {
+      throw new Error("Proxycurl: request failed or timed out");
+    }
 
     if (response.status === 401) {
       throw new Error("Proxycurl: Invalid API key");
@@ -213,13 +217,17 @@ export class ProxycurlLinkedInProvider extends BaseProvider {
     ctx.logger.debug("Proxycurl profile fetch starting", { linkedInUrl });
 
     const response = await ctx.httpClient.httpFetch(url, {
-      method: "GET", 
-      timeout: ctx.config.timeoutMs,
+      method: "GET",
+      timeoutMs: ctx.config.timeoutMs,
       headers: {
         "Authorization": `Bearer ${ctx.config.apiKey || process.env.PROXYCURL_API_KEY}`,
         "Accept": "application/json"
       }
     });
+
+    if (!response) {
+      throw new Error("Proxycurl: request failed or timed out");
+    }
 
     if (response.status === 401) {
       throw new Error("Proxycurl: Invalid API key");
@@ -386,14 +394,14 @@ export class ProxycurlLinkedInProvider extends BaseProvider {
       // Test with credit balance check
       const response = await ctx?.httpClient.httpFetch(`${this.API_BASE}/v2/credit-balance`, {
         method: "GET",
-        timeout: 5000,
+        timeoutMs: 5000,
         headers: {
           "Authorization": `Bearer ${apiKey}`,
           "Accept": "application/json"
         }
       });
 
-      return response.status === 200;
+      return response?.status === 200;
     } catch (error) {
       return false;
     }

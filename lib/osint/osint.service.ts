@@ -31,6 +31,9 @@ import { EmailAgent } from "./core/agents/email-agent";
 import { NewsAgent } from "./core/agents/news-agent";
 import { WebsiteAgent } from "./core/agents/website-agent";
 import { aiReasoner } from "./core/agents/ai-reasoner";
+import { ruleBasedReasoner } from "./core/agents/rule-based-reasoner";
+import { buildNewsConclusions } from "./core/infrastructure/news-conclusions";
+import { extractNotesSignals } from "./core/infrastructure/notes-signals";
 
 // Legacy types for compatibility
 import type { ClientInput, EnrichmentResult } from "@/lib/enrichment/types";
@@ -116,7 +119,7 @@ export class OsintService {
    * Main enrichment method - replaces ProfileEnrichmentService.enrich()
    * Maintains backward compatibility with the legacy EnrichmentResult format
    */
-  async enrich(client: ClientInput): Promise<EnrichmentResult> {
+  async enrich(client: ClientInput, runId?: string): Promise<EnrichmentResult> {
     const startTime = Date.now();
     const runLogger = logger.child({ clientId: client.id });
 
@@ -131,7 +134,15 @@ export class OsintService {
         clientId: client.id,
         trigger: "manual",
         triggeredBy: "crm_user",
+        runId,
       };
+
+      // Free-text CRM notes often carry disambiguating context a plain
+      // name search can't find on its own (e.g. "se muda a Mendoza") —
+      // extract that as a separate hint rather than overloading `locality`,
+      // since search-agent.ts needs to treat it as an *additional* query,
+      // not a replacement for the declared locality.
+      const notesSignals = extractNotesSignals(client.notes);
 
       // Prepare initial hints from client data
       const initialHints = {
@@ -142,19 +153,34 @@ export class OsintService {
         locality: client.locality,
         profession: client.profession,
         company: client.company,
+        notesLocality: notesSignals.mentionedLocality ?? undefined,
       };
 
       // Run the investigation using the new OSINT planner
       const investigationResult = await this.planner.investigate(request, initialHints);
 
-      // 8. AI Reasoner: Generate insights from the final knowledge graph
+      // 8. AI Reasoner: Generate insights from the final knowledge graph.
+      // Falls back to rule-based heuristics when OPENAI_API_KEY isn't set —
+      // previously this step was just skipped, leaving purchasingPower/
+      // professionalProfile empty for every lead without a paid key.
       if (investigationResult.personProfile) {
         const aiInsights = await aiReasoner.generateInsights(
           investigationResult.personProfile,
           investigationResult.companyProfile,
           investigationResult.overallConfidence
         );
-        investigationResult.aiInsights = aiInsights;
+        investigationResult.aiInsights = aiInsights ?? ruleBasedReasoner.generateInsights(
+          investigationResult.personProfile,
+          investigationResult.companyProfile,
+          investigationResult.overallConfidence
+        );
+
+        if (notesSignals.observations.length > 0 && investigationResult.aiInsights) {
+          investigationResult.aiInsights.alerts = [
+            ...investigationResult.aiInsights.alerts,
+            ...notesSignals.observations,
+          ];
+        }
       }
 
       // Convert InvestigationResult to legacy EnrichmentResult format
@@ -279,7 +305,25 @@ export class OsintService {
   }
 
   private convertSocialProfiles(socialEntities: any[]): any[] {
-    return socialEntities.map(entity => {
+    // Keep only the highest-confidence entity per platform. Without this,
+    // every candidate SocialAgent/WebsiteAgent ever found for a platform
+    // (including near-zero-confidence name collisions — a search for
+    // "site:instagram.com <name>" can surface a completely unrelated
+    // account whose bio just happens to mention the name) ends up in the
+    // same array, and downstream consumers that key by platform (the CRM's
+    // socialLinks summary in osint.worker.ts) just take whichever one came
+    // last — not the best match. Deduping here means every consumer of the
+    // legacy EnrichmentResult benefits, not just one call site.
+    const bestByPlatform = new Map<string, any>();
+    for (const entity of socialEntities) {
+      const platform = entity.properties.platform;
+      const current = bestByPlatform.get(platform);
+      if (!current || entity.confidence > current.confidence) {
+        bestByPlatform.set(platform, entity);
+      }
+    }
+
+    return Array.from(bestByPlatform.values()).map(entity => {
       const props = entity.properties;
       return {
         platform: props.platform,
@@ -394,27 +438,29 @@ export class OsintService {
     companyProfile: CompanyProfileView | null
   ): string[] {
     const insights: string[] = [];
-    
+
+    // Conclusions first — actionable statements a salesperson can use
+    // ("Está contratando vendedores", "Empresa en expansión"), derived from
+    // news-agent.ts's existing category classification. This used to be
+    // discarded entirely; buildInsights() only ever surfaced raw counts
+    // (N social profiles, N news items, investigation took Xs), which say
+    // nothing about the lead itself.
+    const allNewsItems = [
+      ...(personProfile?.newsItems ?? []),
+      ...(companyProfile?.newsItems ?? []),
+    ];
+    insights.push(...buildNewsConclusions(allNewsItems).map((c) => `📈 ${c}`));
+
     insights.push(
-      result.identityVerified 
+      result.identityVerified
         ? `✅ Identidad verificada con ${Math.round(result.overallConfidence)}% de confianza`
         : `⚠️ Identidad no verificada. Confianza: ${Math.round(result.overallConfidence)}%`
     );
 
-    if (personProfile?.socialProfiles && personProfile.socialProfiles.length > 0) {
-      insights.push(`📱 ${personProfile.socialProfiles.length} perfiles sociales encontrados`);
-    }
-    
-    if (personProfile?.newsItems && personProfile.newsItems.length > 0) {
-      insights.push(`📰 ${personProfile.newsItems.length} menciones públicas encontradas`);
-    }
-    
     if (companyProfile) {
       insights.push(`🏢 Empresa confirmada: ${(companyProfile.company.properties as any).name}`);
     }
 
-    insights.push(`🔍 Investigación completada en ${Math.round(result.durationMs / 1000)}s con ${result.cyclesExecuted} ciclos`);
-    
     return insights;
   }
 

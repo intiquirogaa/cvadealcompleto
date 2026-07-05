@@ -163,7 +163,11 @@ export abstract class BaseAgent implements OsintAgent {
         capability,
         maxLatency: 10000, // 10s max
         minReliability: 60, // Minimum 60% reliability
-        budget: 0.01 // $0.01 max per query
+        // $0.02 max per query — $0.01 used to sit exactly at SerpApi's
+        // per-request cost, zeroing its cost score in the weighted ranking
+        // and making it lose to free (but noisier) legacy scrapers despite
+        // having a much higher declared priority.
+        budget: 0.02
       });
 
       // Cache successful results

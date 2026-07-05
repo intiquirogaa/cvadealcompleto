@@ -138,6 +138,17 @@ export interface SocialProfileProperties {
   following?: number;
   posts?: number;
   lastActivityAt?: string;
+  verified?: boolean;
+  /** Instagram: isBusinessAccount. Facebook: always true (pages are inherently business profiles). */
+  isBusinessAccount?: boolean;
+  /** Instagram: businessCategoryName. Facebook: categories.join(", "). */
+  businessCategory?: string;
+  /** Link in bio (Instagram externalUrl) or page website (Facebook). Often the lead's own site/portfolio — worth feeding back into WebsiteAgent. */
+  externalUrl?: string;
+  /** Contact channel the platform itself exposes on the profile — not scraped from bio text, so relatively high-confidence when present. */
+  publicEmail?: string;
+  publicPhoneNumber?: string;
+  city?: string;
 }
 
 export interface AddressProperties {
@@ -542,6 +553,8 @@ export interface InvestigationRequest {
   trigger: 'manual' | 'scheduled' | 'webhook';
   triggeredBy: string;
   options?: Partial<OsintConfig>;
+  /** Pre-existing OsintRun id (e.g. created by the API route for SSE subscription) to reuse instead of minting a new one. */
+  runId?: string;
 }
 
 export interface InvestigationResult {

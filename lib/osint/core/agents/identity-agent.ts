@@ -38,6 +38,13 @@ export class IdentityAgent extends BaseAgent {
     const phone = hints.phone as string | undefined;
     const company = hints.company as string | undefined;
     const locality = hints.locality as string | undefined;
+    const notesLocality = hints.notesLocality as string | undefined;
+    // computeAuthenticity's location check splits signals.locality on
+    // commas and matches if ANY part appears in the text — so combining
+    // both here means evidence mentioning either the declared locality or
+    // the one mentioned in the CRM notes (e.g. "se muda a Mendoza") scores
+    // as a location match, without changing computeAuthenticity itself.
+    const combinedLocality = [locality, notesLocality].filter(Boolean).join(", ") || undefined;
     const evidence = (hints.searchEvidence as EvidenceRecord[] | undefined) ?? [];
 
     if (!firstName || !lastName) {
@@ -68,13 +75,13 @@ export class IdentityAgent extends BaseAgent {
       const text = `${ev.title} ${ev.snippet}`;
       const authenticity = computeAuthenticity(
         text,
-        { email, locality, company },
+        { email, locality: combinedLocality, company },
         nameVariants,
         phoneDigits,
       );
 
       // Determine the signal type
-      const signal = this.determineSignalType(authenticity, company, locality);
+      const signal = this.determineSignalType(authenticity, company, combinedLocality);
 
       if (authenticity.score > 0) {
         matchedEvidence.push(ev);
@@ -151,9 +158,16 @@ export class IdentityAgent extends BaseAgent {
       output.evidence.push(ev);
     }
 
-    // Set initial confidence based on best match
+    // Set initial confidence based on best match. bestMatch.score already
+    // comes out of computeAuthenticity on a 0-100 scale (nameMatchStrength
+    // capped at 40 + phone/email/location/company bonuses, then clamped to
+    // 100) — multiplying by 100 again here meant almost any nonzero match
+    // (e.g. a bare phone-digit collision on an unrelated page, worth just
+    // 25 points) instantly saturated to the 100 clamp, which is why
+    // "identityVerified" kept coming back true even off clearly wrong
+    // matches.
     if (bestMatch) {
-      person.confidence = Math.min(100, bestMatch.score * 100);
+      person.confidence = Math.min(100, bestMatch.score);
     }
 
     if (!existingPerson) {

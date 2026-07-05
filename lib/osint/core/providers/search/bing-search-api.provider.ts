@@ -80,7 +80,7 @@ export class BingSearchApiProvider extends BaseProvider {
 
         const response = await ctx.httpClient.httpFetch(url, {
           method: "GET",
-          timeout: ctx.config.timeoutMs,
+          timeoutMs: ctx.config.timeoutMs,
           headers: {
             "Ocp-Apim-Subscription-Key": ctx.config.apiKey || process.env.BING_API_KEY || "",
             "User-Agent": "OSINT-Platform/1.0",
@@ -88,6 +88,10 @@ export class BingSearchApiProvider extends BaseProvider {
             "Accept-Language": "en-US,en;q=0.9"
           }
         });
+
+        if (!response) {
+          throw new Error("Bing API: request failed or timed out");
+        }
 
         if (response.status === 401) {
           throw new Error("Bing API: Invalid or missing API key");
@@ -211,14 +215,14 @@ export class BingSearchApiProvider extends BaseProvider {
       const testUrl = `${this.API_BASE}/search?q=test&count=1`;
       const response = await ctx?.httpClient.httpFetch(testUrl, {
         method: "GET",
-        timeout: 5000,
+        timeoutMs: 5000,
         headers: {
           "Ocp-Apim-Subscription-Key": ctx?.config.apiKey || process.env.BING_API_KEY || "",
           "Accept": "application/json"
         }
       });
 
-      return response.status === 200;
+      return response?.status === 200;
     } catch (error) {
       return false;
     }

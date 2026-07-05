@@ -15,14 +15,22 @@ import { BingOsintProvider } from "./bing-osint.provider";
 import { DuckDuckGoOsintProvider } from "./duckduckgo-osint.provider";
 import { BingSearchApiProvider } from "./search/bing-search-api.provider";
 import { GoogleCseProvider } from "./search/google-cse.provider";
+import { SerpApiProvider } from "./search/serpapi.provider";
 import { NewsApiProvider } from "./news/newsapi.provider";
 import { ProxycurlLinkedInProvider } from "./identity/proxycurl-linkedin.provider";
 import { WebFetcherProvider } from "./fetchers/web-fetcher.provider";
+import { ApifySocialProvider } from "./social/apify-social.provider";
 
 // Default configurations for each provider
 const PROVIDER_CONFIGS: Record<string, ProviderRuntimeConfig> = {
-  // Legacy providers (being phased out)
-  bing_legacy: {
+  // Legacy providers (being phased out).
+  // NOTE: keys here must match each provider's real `.id` (see
+  // bing-osint.provider.ts / duckduckgo-osint.provider.ts) — they used to
+  // be "bing_legacy"/"duckduckgo_legacy", which never matched "bing"/
+  // "duckduckgo" and silently fell back to getFallbackConfig() for both,
+  // making this priority tuning a no-op. Fixed as part of the Playwright
+  // migration since it directly affects which free scraper gets tried first.
+  bing: {
     enabled: true, // Enabled as fallback
     maxConcurrent: 2,
     requestsPerSecond: 0.5,
@@ -36,7 +44,7 @@ const PROVIDER_CONFIGS: Record<string, ProviderRuntimeConfig> = {
     priority: 30
   },
 
-  duckduckgo_legacy: {
+  duckduckgo: {
     enabled: true, // Enabled as a fallback when API keys are not present
     maxConcurrent: 1,
     requestsPerSecond: 0.3,
@@ -47,7 +55,10 @@ const PROVIDER_CONFIGS: Record<string, ProviderRuntimeConfig> = {
     circuitThreshold: 3,
     circuitCooldownMs: 180000,
     costPerRequestUsd: 0,
-    priority: 20
+    // Was priority 20 (below bing's 30) despite testing more reliable in
+    // practice — equalized so the Bayesian reliability tracker (not a
+    // stale static guess) decides the winner going forward.
+    priority: 30
   },
 
   // Production API providers
@@ -81,6 +92,22 @@ const PROVIDER_CONFIGS: Record<string, ProviderRuntimeConfig> = {
     reliabilityScore: 96,
     priority: 85,
     tags: ["google", "high-quality", "structured"]
+  },
+
+  serpapi: {
+    enabled: true,
+    maxConcurrent: 3,
+    requestsPerSecond: 1,
+    timeoutMs: 12000,
+    maxRetries: 2,
+    backoffBaseMs: 2000,
+    backoffMaxMs: 20000,
+    circuitThreshold: 3,
+    circuitCooldownMs: 120000,
+    costPerRequestUsd: 0.01,
+    reliabilityScore: 97,
+    priority: 92,
+    tags: ["google", "real-serp", "high-quality", "structured"]
   },
 
   newsapi_org: {
@@ -129,6 +156,22 @@ const PROVIDER_CONFIGS: Record<string, ProviderRuntimeConfig> = {
     reliabilityScore: 88,
     priority: 80,
     tags: ["web", "content", "free", "structured-data"]
+  },
+
+  apify_social: {
+    enabled: true,
+    maxConcurrent: 2,
+    requestsPerSecond: 0.3, // Actor runs are slow (real browser automation on Apify's side)
+    timeoutMs: 60000, // Sync actor runs can take 30-60s+
+    maxRetries: 1,
+    backoffBaseMs: 3000,
+    backoffMaxMs: 30000,
+    circuitThreshold: 2,
+    circuitCooldownMs: 300000,
+    costPerRequestUsd: 0.01,
+    reliabilityScore: 80,
+    priority: 65,
+    tags: ["apify", "social", "scraper", "structured"]
   }
 };
 
@@ -188,9 +231,11 @@ export class ProviderFactory {
       // Production API providers
       new BingSearchApiProvider(),
       new GoogleCseProvider(),
+      new SerpApiProvider(),
       new NewsApiProvider(),
       new ProxycurlLinkedInProvider(),
-      new WebFetcherProvider()
+      new WebFetcherProvider(),
+      new ApifySocialProvider()
     ];
   }
 
@@ -275,8 +320,10 @@ export class ProviderFactory {
     const envMap: Record<string, string> = {
       bing_search_api: "BING_API_KEY",
       google_cse: "GOOGLE_CSE_API_KEY",
+      serpapi: "SERPAPI_API_KEY",
       newsapi_org: "NEWSAPI_KEY",
-      proxycurl_linkedin: "PROXYCURL_API_KEY"
+      proxycurl_linkedin: "PROXYCURL_API_KEY",
+      apify_social: "APIFY_API_TOKEN"
     };
     
     return envMap[providerId] || null;

@@ -13,8 +13,9 @@ export async function GET() {
     ) {
       return NextResponse.json({ error: "No autorizado" }, { status: 401 });
     }
+    let clients: any[];
     try {
-      const clients = await (prisma.cRMClient as any).findMany({
+      clients = await (prisma.cRMClient as any).findMany({
         orderBy: { updatedAt: "desc" },
         include: {
           activityLogs: {
@@ -23,17 +24,34 @@ export async function GET() {
           },
         },
       });
-      return NextResponse.json(clients ?? []);
     } catch (err) {
       console.warn(
         "CRM activity logs unavailable, falling back to clients only:",
         err
       );
-      const clients = await prisma.cRMClient.findMany({
+      clients = await prisma.cRMClient.findMany({
         orderBy: { updatedAt: "desc" },
       });
-      return NextResponse.json(clients ?? []);
     }
+
+    const advisorIds = Array.from(
+      new Set(clients.map(c => c.assignedAdvisorId).filter(Boolean))
+    ) as string[];
+    const advisors = advisorIds.length
+      ? await prisma.user.findMany({
+          where: { id: { in: advisorIds } },
+          select: { id: true, name: true },
+        })
+      : [];
+    const advisorMap = new Map(advisors.map(a => [a.id, a.name]));
+    const enriched = clients.map(c => ({
+      ...c,
+      assignedAdvisorName: c.assignedAdvisorId
+        ? advisorMap.get(c.assignedAdvisorId) ?? null
+        : null,
+    }));
+
+    return NextResponse.json(enriched ?? []);
   } catch (e: any) {
     console.error("CRM clients fetch error:", e);
     return NextResponse.json([], { status: 500 });

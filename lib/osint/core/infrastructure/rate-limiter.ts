@@ -45,25 +45,46 @@ export class TokenBucketRateLimiter {
   /**
    * Acquire a slot. Resolves when a token is available.
    * Uses async/await — no busy-waiting.
+   *
+   * Loops rather than waiting on a single externally-woken promise:
+   * a bare "push a resolver and wait for release() to call it" design
+   * deadlocks whenever the caller is the only one in flight (tokens
+   * depleted, nothing else will ever call release() to wake it up).
+   * Each iteration waits at most until the next token is due to
+   * refill, so a lone caller always makes forward progress.
    */
   async acquire(): Promise<void> {
-    this.refill();
+    for (;;) {
+      this.refill();
 
-    // If we have tokens and capacity, acquire immediately
-    if (this.state.tokens >= 1 && this.state.activeRequests < this.config.maxConcurrent) {
-      this.state.tokens -= 1;
-      this.state.activeRequests += 1;
-      return;
+      if (this.state.tokens >= 1 && this.state.activeRequests < this.config.maxConcurrent) {
+        this.state.tokens -= 1;
+        this.state.activeRequests += 1;
+        return;
+      }
+
+      const waitMs = this.state.tokens < 1
+        ? Math.max(25, Math.ceil(((1 - this.state.tokens) / this.config.requestsPerSecond) * 1000))
+        : 25;
+      await this.waitForReleaseOrTimeout(waitMs);
     }
+  }
 
-    // Otherwise, wait for a token to become available
-    await new Promise<void>((resolve) => {
-      this.waiters.push(resolve);
+  /** Resolves on the next release() call or after timeoutMs, whichever is first. */
+  private waitForReleaseOrTimeout(timeoutMs: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const idx = this.waiters.indexOf(finish);
+        if (idx !== -1) this.waiters.splice(idx, 1);
+        resolve();
+      };
+      const timer = setTimeout(finish, timeoutMs);
+      this.waiters.push(finish);
     });
-
-    this.refill();
-    this.state.tokens -= 1;
-    this.state.activeRequests += 1;
   }
 
   /** Release a slot after a request completes */

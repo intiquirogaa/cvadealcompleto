@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useState, useMemo, useCallback } from "react";
+import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
@@ -8,7 +8,10 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { toast } from "sonner";
+import { getUnifiedActivities, type CRMActivityLog } from "@/lib/crm/activity";
+import { RELATIONSHIP_STAGES } from "@/lib/crm/relationship-stage";
 import {
   Users,
   Plus,
@@ -34,6 +37,13 @@ import {
   Linkedin,
   Instagram,
   Facebook,
+  Twitter,
+  Youtube,
+  Github,
+  Music2,
+  Briefcase,
+  BadgeCheck,
+  Newspaper,
   Globe,
   Sparkles,
   Check,
@@ -47,6 +57,7 @@ import {
   Sparkle,
   ThumbsUp,
   ThumbsDown,
+  Milestone,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -59,6 +70,27 @@ import { CRMDashboard } from "./crm-dashboard";
 import { CRMCampaigns } from "./crm-campaigns";
 import { WhatsAppChat } from "@/components/whatsapp-chat";
 import { WhatsAppQRConnect } from "@/components/whatsapp-qr-connect";
+
+const SOCIAL_PLATFORM_ICON: Record<string, any> = {
+  linkedin: Linkedin,
+  instagram: Instagram,
+  facebook: Facebook,
+  twitter: Twitter,
+  youtube: Youtube,
+  github: Github,
+  tiktok: Music2,
+};
+
+/** Color-codes a 0-100 OSINT confidence score so low-confidence findings
+ * (common with noisy free scrapers) are visually distinct from solid ones. */
+function confidenceBadgeClass(confidence?: number): string {
+  if (confidence === undefined || confidence === null) return "";
+  if (confidence >= 70)
+    return "bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-300 dark:border-green-900/40";
+  if (confidence >= 40)
+    return "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-300 dark:border-amber-900/40";
+  return "bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-300 dark:border-red-900/40";
+}
 
 const PROPERTY_INTERESTS = [
   "Casa",
@@ -112,58 +144,14 @@ const STAGES_LIST = [
   },
 ];
 
-export function getUnifiedActivities(c: any): CRMActivityLog[] {
-  const baseLogs = c.activityLogs && c.activityLogs.length > 0 ? [...c.activityLogs] : [];
-
-  if (c.lastEnriched && !baseLogs.some((l: any) => l.type === "osint_enrichment")) {
-    baseLogs.push({
-      id: "last-enriched",
-      type: "osint_enrichment",
-      title: "Escaneo web y redes sociales",
-      description: "La inteligencia artificial completó el perfil con web scraping.",
-      createdAt: c.lastEnriched,
-    });
-  }
-
-  if (c.updatedAt && c.updatedAt !== c.createdAt && !baseLogs.some((l: any) => l.type === "status_changed")) {
-    const info = STAGES_LIST.find(s => s.key === c.stage) ?? STAGES_LIST[0];
-    baseLogs.push({
-      id: "status-changed",
-      type: "status_changed",
-      title: `Estado cambiado a ${info.label}`,
-      description: "Modificado en el CRM",
-      createdAt: c.updatedAt,
-    });
-  }
-
-  if (!baseLogs.some((l: any) => l.type === "created")) {
-    baseLogs.push({
-      id: "created",
-      type: "created",
-      title: "Lead creado en base de datos",
-      description: "Asesor asignado registró el cliente.",
-      createdAt: c.createdAt,
-    });
-  }
-
-  baseLogs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  return baseLogs;
+function resolveStageLabel(stageKey: string): string {
+  return (STAGES_LIST.find(s => s.key === stageKey) ?? STAGES_LIST[0]).label;
 }
 
 const STAGES: Record<string, { label: string; color: string }> = {};
 STAGES_LIST.forEach(s => {
   STAGES[s.key] = { label: s.label, color: `${s.lightColor} text-foreground` };
 });
-
-interface CRMActivityLog {
-  id: string;
-  type: string;
-  title: string;
-  description: string;
-  metadata?: string | null;
-  createdById?: string | null;
-  createdAt: string;
-}
 
 interface CRMClientData {
   id: string;
@@ -174,10 +162,12 @@ interface CRMClientData {
   locality: string;
   propertiesInterest: string[];
   stage: string;
+  relationshipStage: string;
   nextContactDate: string | null;
   nextContactNote: string | null;
   notes: string;
   assignedAdvisorId: string | null;
+  assignedAdvisorName?: string | null;
   createdAt: string;
   updatedAt: string;
   profession?: string | null;
@@ -187,6 +177,8 @@ interface CRMClientData {
   insights?: string | null;
   alerts?: string | null;
   lastEnriched?: string | null;
+  autoEnrichEnabled?: boolean;
+  autoEnrichIntervalDays?: number | null;
   conversationText?: string | null;
   conversationSentiment?: string | null;
   conversationAnalysis?: string | null;
@@ -352,6 +344,46 @@ export function CRMContent() {
     ).length;
   }, [clients]);
 
+  // Notification bell: reminder_call/auto_enrich_queued CRMActivityLog rows
+  // logged today by the daily BullMQ job (see lib/queue/osint.worker.ts).
+  // Sourced from client.activityLogs, already included in GET
+  // /api/crm/clients — no extra request needed. "Today" compares the UTC
+  // date string, matching how the worker computes its own day window.
+  const todayAlerts = useMemo(() => {
+    const todayStr = new Date().toISOString().split("T")[0];
+    const items: {
+      client: CRMClientData;
+      log: CRMActivityLog;
+    }[] = [];
+    for (const client of clients) {
+      for (const log of client.activityLogs ?? []) {
+        if (
+          (log.type === "reminder_call" || log.type === "auto_enrich_queued") &&
+          log.createdAt.slice(0, 10) === todayStr
+        ) {
+          items.push({ client, log });
+        }
+      }
+    }
+    items.sort(
+      (a, b) => new Date(b.log.createdAt).getTime() - new Date(a.log.createdAt).getTime()
+    );
+    return items;
+  }, [clients]);
+
+  // Toast once per page load summarizing today's alerts, so the advisor
+  // doesn't have to open the bell to know there's something waiting.
+  const hasToastedAlertsRef = useRef(false);
+  useEffect(() => {
+    if (hasToastedAlertsRef.current || todayAlerts.length === 0) return;
+    hasToastedAlertsRef.current = true;
+    toast.info(
+      todayAlerts.length === 1
+        ? `${todayAlerts[0].client.firstName} ${todayAlerts[0].client.lastName}: ${todayAlerts[0].log.title}`
+        : `Tenés ${todayAlerts.length} alertas de hoy`
+    );
+  }, [todayAlerts]);
+
   const stageCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     STAGES_LIST.forEach(s => (counts[s.key] = 0));
@@ -493,6 +525,45 @@ export function CRMContent() {
                 </div>
               </div>
               <div className="flex gap-2">
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button variant="outline" className="relative">
+                      <Bell className="w-4 h-4" />
+                      {todayAlerts.length > 0 && (
+                        <span className="absolute -top-1.5 -right-1.5 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+                          {todayAlerts.length}
+                        </span>
+                      )}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" className="w-80 max-h-96 overflow-y-auto">
+                    <h4 className="font-bold text-sm text-foreground mb-3">
+                      Alertas de hoy
+                    </h4>
+                    {todayAlerts.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">
+                        No hay alertas para hoy.
+                      </p>
+                    ) : (
+                      <div className="space-y-3">
+                        {todayAlerts.map(({ client, log }) => (
+                          <button
+                            key={log.id}
+                            onClick={() => setFullProfileClient(client)}
+                            className="w-full text-left border-b border-border/40 pb-2 last:border-0 hover:bg-muted/30 rounded px-1 -mx-1 transition-colors"
+                          >
+                            <p className="text-xs font-semibold text-foreground">
+                              {client.firstName} {client.lastName}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              {log.title}
+                            </p>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </PopoverContent>
+                </Popover>
                 <Button
                   onClick={() => setShowImport(true)}
                   variant="outline"
@@ -1117,7 +1188,7 @@ function ClientDetail({
           </p>
           <div className="space-y-3 text-xs max-h-48 overflow-y-auto pr-1">
             {(() => {
-              const acts = getUnifiedActivities(client);
+              const acts = getUnifiedActivities(client, resolveStageLabel(client.stage));
               if (acts.length > 0) {
                 const log = acts[0];
                 return (
@@ -1196,6 +1267,7 @@ function CRMClientProfile({
   const [isEnriching, setIsEnriching] = useState(false);
   const [enrichStep, setEnrichStep] = useState(0);
   const [savingAlert, setSavingAlert] = useState(false);
+  const [savingAutoEnrich, setSavingAutoEnrich] = useState(false);
   const [newNote, setNewNote] = useState("");
   const [tasks, setTasks] = useState<
     { id: string; text: string; done: boolean }[]
@@ -1446,6 +1518,71 @@ function CRMClientProfile({
     }
   };
 
+  const handleSetNextContact = async (
+    fields: { nextContactDate?: string | null; nextContactNote?: string }
+  ) => {
+    try {
+      const res = await fetch(`/api/crm/clients/${client.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(fields),
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        onUpdate(updated);
+      } else {
+        toast.error("Error al guardar el recordatorio");
+      }
+    } catch {
+      toast.error("Error de conexión");
+    }
+  };
+
+  const handleToggleAutoEnrich = async () => {
+    setSavingAutoEnrich(true);
+    try {
+      const res = await fetch(`/api/crm/clients/${client.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          autoEnrichEnabled: !client.autoEnrichEnabled,
+        }),
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        onUpdate(updated);
+        toast.success("Configuración de re-enriquecimiento actualizada");
+      } else {
+        toast.error("Error al guardar la configuración");
+      }
+    } catch {
+      toast.error("Error de conexión");
+    } finally {
+      setSavingAutoEnrich(false);
+    }
+  };
+
+  const handleSetAutoEnrichInterval = async (days: number) => {
+    setSavingAutoEnrich(true);
+    try {
+      const res = await fetch(`/api/crm/clients/${client.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ autoEnrichIntervalDays: days }),
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        onUpdate(updated);
+      } else {
+        toast.error("Error al guardar el intervalo");
+      }
+    } catch {
+      toast.error("Error de conexión");
+    } finally {
+      setSavingAutoEnrich(false);
+    }
+  };
+
   const handleSaveNotes = async () => {
     if (!newNote.trim()) return;
     const dateStr = new Date().toLocaleDateString("es-AR", {
@@ -1470,6 +1607,30 @@ function CRMClientProfile({
       }
     } catch {
       toast.error("Error al guardar nota");
+    }
+  };
+
+  const [savingRelationshipStage, setSavingRelationshipStage] = useState(false);
+  const handleUpdateRelationshipStage = async (key: string) => {
+    if (key === client.relationshipStage) return;
+    setSavingRelationshipStage(true);
+    try {
+      const res = await fetch(`/api/crm/clients/${client.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ relationshipStage: key }),
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        onUpdate(updated);
+        toast.success("Etapa de relación actualizada");
+      } else {
+        toast.error("Error al actualizar la etapa");
+      }
+    } catch {
+      toast.error("Error de conexión");
+    } finally {
+      setSavingRelationshipStage(false);
     }
   };
 
@@ -1501,6 +1662,7 @@ function CRMClientProfile({
     { name: "Resumen", icon: History },
     { name: "Información", icon: Users },
     { name: "Actividad", icon: Activity },
+    { name: "Relación", icon: Milestone },
     { name: "IA - Perfil Inteligente", icon: Sparkles, badge: "Nuevo" },
     { name: "Redes Sociales", icon: Globe },
     { name: "Documentos", icon: FileText },
@@ -1812,6 +1974,22 @@ function CRMClientProfile({
                           </div>
                           <div>
                             <span className="text-muted-foreground block text-xs">
+                              Profesión
+                            </span>
+                            <span className="font-medium text-foreground">
+                              {client.profession || "No registrada"}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground block text-xs">
+                              Empresa
+                            </span>
+                            <span className="font-medium text-foreground">
+                              {client.company || "No registrada"}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground block text-xs">
                               Fecha de nacimiento
                             </span>
                             <span className="font-medium text-foreground">
@@ -2001,6 +2179,168 @@ function CRMClientProfile({
                                 </div>
                               </div>
                             )}
+                            {enrichmentResult.identity?.matchedSignals
+                              ?.length > 0 && (
+                              <div>
+                                <span className="text-muted-foreground block text-xs mb-1">
+                                  Señales de verificación de identidad
+                                </span>
+                                <div className="flex flex-wrap gap-1.5">
+                                  {enrichmentResult.identity.matchedSignals.map(
+                                    (signal: string) => (
+                                      <Badge
+                                        key={signal}
+                                        variant="outline"
+                                        className="text-[10px] inline-flex items-center gap-1"
+                                      >
+                                        <BadgeCheck className="w-3 h-3" />
+                                        {signal}
+                                      </Badge>
+                                    )
+                                  )}
+                                </div>
+                                {!enrichmentResult.identity?.verified && (
+                                  <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-1">
+                                    Identidad no verificada del todo —
+                                    revisar antes de contactar.
+                                  </p>
+                                )}
+                              </div>
+                            )}
+                            {enrichmentResult.profession?.value && (
+                              <div>
+                                <span className="text-muted-foreground block text-xs">
+                                  Profesión detectada
+                                </span>
+                                <span className="font-medium text-foreground inline-flex items-center gap-1.5">
+                                  {enrichmentResult.profession.value}
+                                  <Badge
+                                    variant="outline"
+                                    className={`text-[10px] ${confidenceBadgeClass(
+                                      enrichmentResult.profession.confidence
+                                    )}`}
+                                  >
+                                    {enrichmentResult.profession.confidence}%
+                                  </Badge>
+                                </span>
+                              </div>
+                            )}
+                            {enrichmentResult.company &&
+                              (enrichmentResult.company.industry?.value ||
+                                enrichmentResult.company.website?.value ||
+                                enrichmentResult.company.recentNews?.length >
+                                  0) && (
+                                <div className="rounded-lg border border-border/60 p-2.5 space-y-1.5">
+                                  <span className="text-muted-foreground block text-xs">
+                                    Datos de la empresa
+                                  </span>
+                                  {enrichmentResult.company.industry
+                                    ?.value && (
+                                    <div className="flex items-center gap-1.5 text-xs text-foreground">
+                                      <Briefcase className="w-3 h-3 text-muted-foreground shrink-0" />
+                                      <span>
+                                        {
+                                          enrichmentResult.company.industry
+                                            .value
+                                        }
+                                      </span>
+                                    </div>
+                                  )}
+                                  {enrichmentResult.company.website
+                                    ?.value && (
+                                    <a
+                                      href={
+                                        enrichmentResult.company.website.value
+                                      }
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="flex items-center gap-1.5 text-xs text-primary hover:underline"
+                                    >
+                                      <Globe className="w-3 h-3 shrink-0" />
+                                      <span className="truncate">
+                                        {
+                                          enrichmentResult.company.website
+                                            .value
+                                        }
+                                      </span>
+                                    </a>
+                                  )}
+                                  {enrichmentResult.company.recentNews
+                                    ?.length > 0 && (
+                                    <div className="pt-1 space-y-0.5">
+                                      <span className="text-[10px] text-muted-foreground block">
+                                        Noticias recientes de la empresa
+                                      </span>
+                                      {enrichmentResult.company.recentNews
+                                        .slice(0, 2)
+                                        .map((n: any, idx: number) => (
+                                          <a
+                                            key={idx}
+                                            href={n.url}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="flex items-center gap-1 text-[11px] text-primary hover:underline"
+                                          >
+                                            <Newspaper className="w-3 h-3 shrink-0" />
+                                            <span className="line-clamp-1">
+                                              {n.title}
+                                            </span>
+                                          </a>
+                                        ))}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            {enrichmentResult.socialProfiles?.length > 0 && (
+                              <div>
+                                <span className="text-muted-foreground block text-xs mb-1.5">
+                                  Perfiles sociales encontrados (
+                                  {enrichmentResult.socialProfiles.length})
+                                </span>
+                                <div className="space-y-1.5">
+                                  {enrichmentResult.socialProfiles.map(
+                                    (profile: any, idx: number) => {
+                                      const PlatformIcon =
+                                        SOCIAL_PLATFORM_ICON[
+                                          profile.platform
+                                        ] ?? Globe;
+                                      const confidence =
+                                        profile.url?.confidence;
+                                      return (
+                                        <a
+                                          key={idx}
+                                          href={profile.url?.value}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          className="flex items-center justify-between gap-2 rounded-lg border border-border/60 p-2 hover:bg-muted/40 transition-colors"
+                                        >
+                                          <span className="flex items-center gap-2 min-w-0">
+                                            <PlatformIcon className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                                            <span className="text-xs font-medium text-primary truncate">
+                                              {profile.displayName ||
+                                                profile.url?.value}
+                                            </span>
+                                          </span>
+                                          <Badge
+                                            variant="outline"
+                                            className={`text-[10px] shrink-0 ${confidenceBadgeClass(
+                                              confidence
+                                            )}`}
+                                          >
+                                            {confidence}%
+                                          </Badge>
+                                        </a>
+                                      );
+                                    }
+                                  )}
+                                </div>
+                                <p className="text-[10px] text-muted-foreground mt-1.5">
+                                  Confianza baja (rojo) puede indicar que la
+                                  cuenta pertenece a un medio o tercero
+                                  mencionado junto al lead, no al lead mismo.
+                                </p>
+                              </div>
+                            )}
                           </div>
                         </CardContent>
                       </Card>
@@ -2103,10 +2443,8 @@ function CRMClientProfile({
                                 Poder adquisitivo estimado
                               </span>
                               <span className="font-medium text-green-600 dark:text-green-400">
-                                {
-                                  enrichmentResult.aiAnalysis
-                                    .estimatedPurchasingPower.value
-                                }
+                                {(enrichmentResult.aiAnalysis as any)
+                                  ?.purchasingPower ?? "Desconocido"}
                               </span>
                             </div>
                             <div>
@@ -2169,7 +2507,7 @@ function CRMClientProfile({
                               <span className="text-muted-foreground font-semibold mt-2 block truncate">
                                 {socialLinks.linkedin
                                   ? "LinkedIn /in/..."
-                                  : "No detectado"}
+                                  : "No encontrado"}
                               </span>
                               {socialLinks.linkedin && (
                                 <a
@@ -2186,33 +2524,49 @@ function CRMClientProfile({
                             <div className="border border-border/50 rounded-xl p-3 flex flex-col justify-between min-h-[90px] hover:border-primary/40 transition-colors">
                               <Instagram className="w-5 h-5 text-[#E1306C]" />
                               <span className="text-muted-foreground font-semibold mt-2 block truncate">
-                                {socialLinks.instagram || "No detectado"}
+                                {socialLinks.instagram || "No encontrado"}
                               </span>
                               {socialLinks.instagram && (
-                                <span className="text-primary font-bold hover:underline mt-1 cursor-pointer">
-                                  Ver perfil
-                                </span>
+                                <a
+                                  href={socialLinks.instagram}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-primary font-bold hover:underline mt-1 flex items-center gap-0.5"
+                                >
+                                  Ver perfil{" "}
+                                  <ExternalLink className="w-2.5 h-2.5" />
+                                </a>
                               )}
                             </div>
                             <div className="border border-border/50 rounded-xl p-3 flex flex-col justify-between min-h-[90px] hover:border-primary/40 transition-colors">
                               <Facebook className="w-5 h-5 text-[#1877F2]" />
                               <span className="text-muted-foreground font-semibold mt-2 block truncate">
-                                {socialLinks.facebook || "No detectado"}
+                                {socialLinks.facebook || "No encontrado"}
                               </span>
                               {socialLinks.facebook && (
-                                <span className="text-primary font-bold hover:underline mt-1 cursor-pointer">
-                                  Ver perfil
-                                </span>
+                                <a
+                                  href={socialLinks.facebook}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-primary font-bold hover:underline mt-1 flex items-center gap-0.5"
+                                >
+                                  Ver perfil{" "}
+                                  <ExternalLink className="w-2.5 h-2.5" />
+                                </a>
                               )}
                             </div>
                             <div className="border border-border/50 rounded-xl p-3 flex flex-col justify-between min-h-[90px] hover:border-primary/40 transition-colors">
                               <Globe className="w-5 h-5 text-muted-foreground" />
                               <span className="text-muted-foreground font-semibold mt-2 block truncate">
-                                {socialLinks.website || "No detectado"}
+                                {socialLinks.website || "No encontrado"}
                               </span>
                               {socialLinks.website && (
                                 <a
-                                  href={`https://${socialLinks.website}`}
+                                  href={
+                                    socialLinks.website.startsWith("http")
+                                      ? socialLinks.website
+                                      : `https://${socialLinks.website}`
+                                  }
                                   target="_blank"
                                   rel="noreferrer"
                                   className="text-primary font-bold hover:underline mt-1 flex items-center gap-0.5"
@@ -2434,7 +2788,7 @@ function CRMClientProfile({
                       Registro de actividad
                     </h3>
                     <div className="space-y-4 pl-4 border-l-2 border-primary/20 relative">
-                      {getUnifiedActivities(client).map((event: CRMActivityLog) => {
+                      {getUnifiedActivities(client, resolveStageLabel(client.stage)).map((event: CRMActivityLog) => {
                         const dotColor =
                           event.type === "osint_enrichment"
                             ? "bg-amber-500"
@@ -2442,7 +2796,9 @@ function CRMClientProfile({
                               ? "bg-blue-500"
                               : event.type === "status_changed"
                                 ? "bg-emerald-500"
-                                : "bg-primary";
+                                : event.type === "relationship_stage_changed"
+                                  ? "bg-violet-500"
+                                  : "bg-primary";
 
                         return (
                           <div key={event.id} className="relative text-sm">
@@ -2470,7 +2826,61 @@ function CRMClientProfile({
                 </Card>
               )}
 
-
+              {activeTab === "Relación" && (
+                <Card className="border-0 shadow-sm">
+                  <CardContent className="p-6">
+                    <h3 className="font-bold text-lg text-foreground border-b pb-3 mb-4">
+                      Etapa de relación
+                    </h3>
+                    <p className="text-xs text-muted-foreground mb-6">
+                      Independiente del estado comercial del Kanban. Hacé click en un paso para marcarlo como el actual.
+                    </p>
+                    <div className="flex flex-wrap md:flex-nowrap items-start gap-0">
+                      {RELATIONSHIP_STAGES.map((s, idx) => {
+                        const currentIdx = RELATIONSHIP_STAGES.findIndex(
+                          r => r.key === client.relationshipStage
+                        );
+                        const isCurrent = s.key === client.relationshipStage;
+                        const isDone = currentIdx >= 0 && idx < currentIdx;
+                        return (
+                          <div key={s.key} className="flex items-center flex-1 min-w-[120px]">
+                            <button
+                              type="button"
+                              disabled={savingRelationshipStage}
+                              onClick={() => handleUpdateRelationshipStage(s.key)}
+                              className="flex flex-col items-center gap-1.5 flex-1 group disabled:opacity-60"
+                            >
+                              <div
+                                className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold border-2 transition-colors ${
+                                  isCurrent
+                                    ? "bg-primary border-primary text-primary-foreground"
+                                    : isDone
+                                      ? "bg-primary/15 border-primary/40 text-primary"
+                                      : "bg-muted border-muted-foreground/20 text-muted-foreground group-hover:border-primary/50"
+                                }`}
+                              >
+                                {isDone ? <Check className="w-4 h-4" /> : idx + 1}
+                              </div>
+                              <span
+                                className={`text-[10px] text-center leading-tight ${
+                                  isCurrent ? "font-bold text-foreground" : "text-muted-foreground"
+                                }`}
+                              >
+                                {s.label}
+                              </span>
+                            </button>
+                            {idx < RELATIONSHIP_STAGES.length - 1 && (
+                              <div
+                                className={`h-0.5 flex-1 mt-[-18px] ${isDone ? "bg-primary/40" : "bg-muted-foreground/15"}`}
+                              />
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
 
               {activeTab === "IA - Perfil Inteligente" && (
                 <Card className="border-0 shadow-sm">
@@ -2673,7 +3083,7 @@ function CRMClientProfile({
                                 LinkedIn
                               </span>
                               <span className="text-xs text-muted-foreground">
-                                {socialLinks.linkedin || "No conectado"}
+                                {socialLinks.linkedin || "No encontrado"}
                               </span>
                             </div>
                           </div>
@@ -2697,14 +3107,20 @@ function CRMClientProfile({
                                 Instagram
                               </span>
                               <span className="text-xs text-muted-foreground">
-                                {socialLinks.instagram || "No conectado"}
+                                {socialLinks.instagram || "No encontrado"}
                               </span>
                             </div>
                           </div>
                           {socialLinks.instagram && (
-                            <span className="text-xs font-semibold bg-primary/10 text-primary px-3 py-1.5 rounded-lg hover:bg-primary/20 transition-all cursor-pointer">
-                              Ir al perfil
-                            </span>
+                            <a
+                              href={socialLinks.instagram}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-xs font-semibold bg-primary/10 text-primary px-3 py-1.5 rounded-lg hover:bg-primary/20 transition-all flex items-center gap-1"
+                            >
+                              Ir al perfil{" "}
+                              <ExternalLink className="w-3.5 h-3.5" />
+                            </a>
                           )}
                         </div>
                         <div className="flex items-center justify-between border p-4 rounded-xl">
@@ -2715,14 +3131,20 @@ function CRMClientProfile({
                                 Facebook
                               </span>
                               <span className="text-xs text-muted-foreground">
-                                {socialLinks.facebook || "No conectado"}
+                                {socialLinks.facebook || "No encontrado"}
                               </span>
                             </div>
                           </div>
                           {socialLinks.facebook && (
-                            <span className="text-xs font-semibold bg-primary/10 text-primary px-3 py-1.5 rounded-lg hover:bg-primary/20 transition-all cursor-pointer">
-                              Ir al perfil
-                            </span>
+                            <a
+                              href={socialLinks.facebook}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-xs font-semibold bg-primary/10 text-primary px-3 py-1.5 rounded-lg hover:bg-primary/20 transition-all flex items-center gap-1"
+                            >
+                              Ir al perfil{" "}
+                              <ExternalLink className="w-3.5 h-3.5" />
+                            </a>
                           )}
                         </div>
                         <div className="flex items-center justify-between border p-4 rounded-xl">
@@ -2733,13 +3155,17 @@ function CRMClientProfile({
                                 Sitio web
                               </span>
                               <span className="text-xs text-muted-foreground">
-                                {socialLinks.website || "No conectado"}
+                                {socialLinks.website || "No encontrado"}
                               </span>
                             </div>
                           </div>
                           {socialLinks.website && (
                             <a
-                              href={`https://${socialLinks.website}`}
+                              href={
+                                socialLinks.website.startsWith("http")
+                                  ? socialLinks.website
+                                  : `https://${socialLinks.website}`
+                              }
                               target="_blank"
                               rel="noreferrer"
                               className="text-xs font-semibold bg-primary/10 text-primary px-3 py-1.5 rounded-lg hover:bg-primary/20 transition-all flex items-center gap-1"
@@ -3013,6 +3439,116 @@ function CRMClientProfile({
               )}
 
               {activeTab === "Alertas" && (
+                <div className="space-y-6">
+                <Card className="border-0 shadow-sm">
+                  <CardContent className="p-6">
+                    <h3 className="font-bold text-lg text-foreground border-b pb-3 mb-4">
+                      Recordatorio de llamada
+                    </h3>
+                    <p className="text-xs text-muted-foreground mb-4 leading-relaxed">
+                      El día programado, el lead aparece en las tareas del
+                      dashboard y queda registrado en la Actividad del cliente.
+                    </p>
+                    <div className="grid grid-cols-2 gap-4 max-w-md">
+                      <div>
+                        <Label className="text-xs">Fecha</Label>
+                        <Input
+                          key={`date-${client.id}`}
+                          type="date"
+                          defaultValue={
+                            client.nextContactDate
+                              ? new Date(client.nextContactDate)
+                                  .toISOString()
+                                  .split("T")[0]
+                              : ""
+                          }
+                          onBlur={e =>
+                            handleSetNextContact({
+                              nextContactDate: e.target.value || null,
+                            })
+                          }
+                          className="mt-1"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-xs">Nota</Label>
+                        <Input
+                          key={`note-${client.id}`}
+                          defaultValue={client.nextContactNote || ""}
+                          onBlur={e =>
+                            handleSetNextContact({
+                              nextContactNote: e.target.value,
+                            })
+                          }
+                          placeholder="Ej: Confirmar interés en depto 2 amb."
+                          className="mt-1"
+                        />
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card className="border-0 shadow-sm">
+                  <CardContent className="p-6">
+                    <h3 className="font-bold text-lg text-foreground border-b pb-3 mb-4">
+                      Re-enriquecimiento automático
+                    </h3>
+                    <p className="text-xs text-muted-foreground mb-4 leading-relaxed">
+                      Vuelve a correr el enriquecimiento OSINT solo, cada tantos
+                      días, y actualiza el perfil sin que nadie tenga que
+                      apretar "Enriquecer perfil" a mano.
+                    </p>
+                    <div className="flex items-start justify-between border-b pb-4 max-w-md">
+                      <div className="space-y-0.5">
+                        <span className="font-semibold text-foreground text-sm">
+                          Activar re-enriquecimiento periódico
+                        </span>
+                        <p className="text-xs text-muted-foreground">
+                          {client.lastEnriched
+                            ? `Último enriquecimiento: ${new Date(client.lastEnriched).toLocaleDateString("es-AR")}`
+                            : "Todavía no se enriqueció este perfil."}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={savingAutoEnrich}
+                        onClick={handleToggleAutoEnrich}
+                        className={`w-9 h-5 rounded-full p-0.5 transition-colors focus:outline-none flex-shrink-0 ${
+                          client.autoEnrichEnabled
+                            ? "bg-primary"
+                            : "bg-muted border border-border"
+                        }`}
+                      >
+                        <div
+                          className={`w-3.5 h-3.5 bg-white rounded-full shadow-sm transform transition-transform ${
+                            client.autoEnrichEnabled
+                              ? "translate-x-4"
+                              : "translate-x-0"
+                          }`}
+                        />
+                      </button>
+                    </div>
+                    {client.autoEnrichEnabled && (
+                      <div className="mt-4 max-w-xs">
+                        <Label className="text-xs">Repetir cada</Label>
+                        <select
+                          value={client.autoEnrichIntervalDays ?? 30}
+                          disabled={savingAutoEnrich}
+                          onChange={e =>
+                            handleSetAutoEnrichInterval(Number(e.target.value))
+                          }
+                          className="bg-background border border-border rounded-lg px-2 py-1.5 text-xs text-foreground w-full mt-1 focus:outline-none focus:ring-2 focus:ring-primary/50"
+                        >
+                          <option value={7}>7 días</option>
+                          <option value={15}>15 días</option>
+                          <option value={30}>30 días</option>
+                          <option value={60}>60 días</option>
+                        </select>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
                 <Card className="border-0 shadow-sm">
                   <CardContent className="p-6">
                     <h3 className="font-bold text-lg text-foreground border-b pb-3 mb-4">
@@ -3094,6 +3630,7 @@ function CRMClientProfile({
                     </div>
                   </CardContent>
                 </Card>
+                </div>
               )}
 
               {activeTab === "Tareas" && (
